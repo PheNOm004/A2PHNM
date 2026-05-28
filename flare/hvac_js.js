@@ -1080,6 +1080,7 @@ setInterval(fetchWeather, 300000);
                 .then(function(d) {
                     if (!d.items || !d.items.length) return;
                     var s = d.items[0];
+                    if (s.target_temp != null) { targetTemp = s.target_temp; $('target-temp').innerText = dispTemp(targetTemp)+dispUnit(); }
                     if (s.idle_band != null) { idleBand = s.idle_band; $('idle-band').innerText = dispBand(); var ib2=$('idle-band-2'); if(ib2) ib2.innerText=dispBand(); }
                     if (s.shutoff_buffer != null) { SHUTOFF_BUFFER = s.shutoff_buffer; var sb=$('shutoff-buffer-val'); if(sb) sb.innerText=dispDelta(SHUTOFF_BUFFER)+dispUnit(); }
                     if (s.is_celsius != null && s.is_celsius !== isCelsius) setUnit(s.is_celsius);
@@ -1106,10 +1107,8 @@ setInterval(fetchWeather, 300000);
                 var ageStr = ageMs < 60000 ? Math.round(ageMs / 1000) + 's ago'
                                            : Math.round(ageMs / 60000) + ' min ago';
 
-                if (rec.target_temp != null) {
-                    targetTemp = parseFloat(rec.target_temp);
-                    $('target-temp').innerText = dispTemp(targetTemp) + dispUnit();
-                }
+                // target_temp in a reading reflects what the device had at post time —
+                // do NOT override browser targetTemp from it (settings are the source of truth)
 
                 lastKnownTemp = temp;
                 var diff  = temp - targetTemp;

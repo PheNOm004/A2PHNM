@@ -59,9 +59,15 @@ if (!isNaN(parseFloat(currentTemp))) {
     var momentumCoast = trendRate !== null ? Math.abs(trendRate) * COAST_FACTOR : 0;
     var naturalDrift  = outdoorTemp !== null ? Math.abs(currentTemp - outdoorTemp) * THERMAL_COEFF : 0;
     var dynOffset     = Math.max(0.1, Math.min(idleBand * 0.5, momentumCoast + naturalDrift));
-    var asymAdj       = COAST_ASYMMETRY * 0.2;
-    coolShutoff = Math.max(0.1, Math.min(idleBand - 0.2, dynOffset + asymAdj));
-    heatShutoff = Math.max(0.1, Math.min(idleBand - 0.2, dynOffset - asymAdj));
+    var asymAdj = COAST_ASYMMETRY * 0.2;
+    // Cool+ (positive) → smaller coolShutoff → cools further; Warm+ (negative) → smaller heatShutoff → heats further.
+    // When |asymmetry| > 0.5, the shutoff crosses zero — system deliberately overshoots the target.
+    var coolOvershoot = COAST_ASYMMETRY > 0.5 ? (COAST_ASYMMETRY - 0.5) * 2.0 : 0;
+    var heatOvershoot = COAST_ASYMMETRY < -0.5 ? (-COAST_ASYMMETRY - 0.5) * 2.0 : 0;
+    coolShutoff = Math.min(idleBand - 0.2, dynOffset - asymAdj - coolOvershoot);
+    heatShutoff = Math.min(idleBand - 0.2, dynOffset + asymAdj - heatOvershoot);
+    if (coolOvershoot === 0) coolShutoff = Math.max(0.1, coolShutoff);
+    if (heatOvershoot === 0) heatShutoff = Math.max(0.1, heatShutoff);
   } else {
     coolShutoff = heatShutoff = Math.max(0, SHUTOFF_BUFFER || 0);
   }

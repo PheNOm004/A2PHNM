@@ -389,7 +389,7 @@
             <div class="tuning-hints">
               <span><strong>Momentum Factor</strong> — scales how strongly the rate of temp change advances the shutoff point. Higher = earlier cutoff when temp is changing fast. Auto-set from outdoor/indoor gap each weather refresh.</span>
               <span><strong>Thermal Coeff</strong> — scales how strongly the outdoor/indoor temp gap advances shutoff. Higher = earlier cutoff with large gap. Auto-set from outdoor humidity each weather refresh.</span>
-              <span><strong>Coast Direction</strong> — <em>Cool+</em> = cooling cuts earlier, heating later (summer). <em>Warm+</em> = heating cuts earlier, cooling later (winter). <em>Neutral</em> = symmetric.</span>
+              <span><strong>Coast Direction</strong> — <em>Cool+</em> = system runs cooler (cooling shuts off later / below target, heating shuts off earlier). <em>Warm+</em> = system runs warmer (heating shuts off later / above target, cooling shuts off earlier). Past ±50% the system deliberately overshoots the target — up to ~1°C at ±100%. <em>Neutral</em> = symmetric shutoff.</span>
             </div>
           </div>
         </div>
