@@ -396,6 +396,7 @@ async function loadSettings() {
             var tcEl=$('thermal-coeff');       if (tcEl) tcEl.value=THERMAL_COEFF.toFixed(3);
             var caEl=$('coast-asymmetry-val'); if (caEl) caEl.innerText=coastAsymmetryLabel();
             _syncDynamicUI();
+            $('setup-modal').style.display = 'none'; // settings exist — skip setup
         }
     } catch(e) {}
 }
@@ -439,13 +440,19 @@ async function saveSetup() {
         // Reload page so the new PB constant takes effect (it's evaluated at startup)
         if (pbVal && pbVal !== PB) { localStorage.setItem('hvac_pb_url', pbVal); location.reload(); return; }
     }
+    var setupBody = {
+        target_temp:modalTargetTemp, idle_band:idleBand, city:city, is_celsius:modalIsCelsius,
+        shutoff_buffer:SHUTOFF_BUFFER,
+        cost_kwh:25, watt_heater:1000, watt_cooler:1500, watt_fan:50
+    };
     try {
-        var r = await pbPost('/api/collections/settings/records', {
-            target_temp:modalTargetTemp, idle_band:idleBand, city:city, is_celsius:modalIsCelsius,
-            shutoff_buffer:SHUTOFF_BUFFER,
-            cost_kwh:25, watt_heater:1000, watt_cooler:1500, watt_fan:50
-        });
-        if (r) settingsId = (await r.json()).id;
+        if (settingsId) {
+            // Record already loaded — patch it instead of creating a duplicate
+            await pbPatch('/api/collections/settings/records/'+settingsId, setupBody);
+        } else {
+            var r = await pbPost('/api/collections/settings/records', setupBody);
+            if (r) settingsId = (await r.json()).id;
+        }
     } catch(e) {}
     targetTemp=modalTargetTemp; isCelsius=modalIsCelsius; currentCity=city;
     $('city-in').value=city;
