@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HVAC Dashboard</title>
+  <link rel="stylesheet" href="hvac_css.css" />
+</head>
+<body>
+  <div id="setup-modal" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-title">HVAC Setup</div>
+      <div class="modal-field">
+        <div class="modal-label">Target Temperature</div>
+        <div class="control-adj">
+          <button class="btn-adj" onclick="modalAdjTemp(-0.5)">−</button>
+          <span class="control-val" id="modal-temp-val">22.0°C</span>
+          <button class="btn-adj" onclick="modalAdjTemp(0.5)">+</button>
+        </div>
+      </div>
+      <div class="modal-field">
+        <div class="modal-label">Unit</div>
+        <div class="unit-toggle">
+          <button
+            class="unit-opt active"
+            id="modal-btn-c"
+            onclick="modalSetUnit(true)"
+          >
+            °C
+          </button>
+          <button
+            class="unit-opt"
+            id="modal-btn-f"
+            onclick="modalSetUnit(false)"
+          >
+            °F
+          </button>
+        </div>
+      </div>
+      <div class="modal-field">
+        <div class="modal-label">City (outdoor weather)</div>
+        <input class="city-input" id="modal-city" placeholder="Sydney" />
+      </div>
+      <button class="btn-sm modal-start" onclick="saveSetup()">
+        Start Dashboard
+      </button>
+    </div>
+  </div>
+
+  <header>
+    <div class="header-brand">
+      <button class="btn-hamburger" onclick="toggleSidebar()">☰</button>
+      <span class="brand-tag">BN304</span>
+      <h1>HVAC <span>Dashboard</span></h1>
+    </div>
+    <div class="header-right">
+      <div class="unit-toggle">
+        <button class="unit-opt active" id="btn-c" onclick="setUnit(true)">
+          °C
+        </button>
+        <button class="unit-opt" id="btn-f" onclick="setUnit(false)">°F</button>
+      </div>
+      <div id="system-badge" class="status-badge idle">Idle</div>
+    </div>
+  </header>
+
+  <div class="app-layout">
+    <nav class="sidebar" id="sidebar">
+      <button
+        class="nav-btn active"
+        id="nav-control"
+        onclick="showView('control')"
+        title="Control"
+      >
+        <span class="nav-icon">⚙️</span><span class="nav-label">Control</span>
+      </button>
+      <button
+        class="nav-btn"
+        id="nav-history"
+        onclick="showView('history')"
+        title="History"
+      >
+        <span class="nav-icon">📊</span><span class="nav-label">History</span>
+      </button>
+      <button
+        class="nav-btn"
+        id="nav-analysis"
+        onclick="showView('analysis')"
+        title="Analysis"
+      >
+        <span class="nav-icon">🤖</span><span class="nav-label">Analysis</span>
+      </button>
+    </nav>
+
+    <div class="view-container">
+      <div id="view-control">
+        <div class="row-3">
+          <div class="card">
+            <div class="card-label">Indoor Temperature</div>
+            <div class="temp-display">
+              <span class="temp-value" id="indoor-temp">--</span>
+              <span class="temp-unit" id="temp-unit">°C</span>
+            </div>
+            <div class="control-row">
+              <div class="control-group">
+                <span class="control-label">Target</span>
+                <div class="control-adj">
+                  <button class="btn-adj" onclick="adjustTarget(-0.5)">
+                    −
+                  </button>
+                  <span class="control-val" id="target-temp">22.0°C</span>
+                  <button class="btn-adj" onclick="adjustTarget(0.5)">+</button>
+                </div>
+              </div>
+              <div class="control-group">
+                <span class="control-label">Idle Band</span>
+                <div class="control-adj">
+                  <button class="btn-adj" onclick="adjustIdleBand(-0.5)">
+                    −
+                  </button>
+                  <span class="control-val" id="idle-band">±1.0°C</span>
+                  <button class="btn-adj" onclick="adjustIdleBand(0.5)">
+                    +
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-label">HVAC Devices</div>
+            <div class="device-list">
+              <div class="device-item" id="heater">
+                <span class="device-icon">🔥</span>
+                <span class="device-name"
+                  >Heater <span class="pin-tag">D18</span></span
+                >
+                <span class="device-state status-off" id="heater-state"
+                  >Off</span
+                >
+              </div>
+              <div class="device-item" id="cooler">
+                <span class="device-icon">❄️</span>
+                <span class="device-name"
+                  >Cooler / AC <span class="pin-tag">D5</span></span
+                >
+                <span class="device-state status-off" id="cooler-state"
+                  >Off</span
+                >
+              </div>
+              <div class="device-item" id="fan">
+                <span class="device-icon">💨</span>
+                <span class="device-name"
+                  >Inlet Fan <span class="pin-tag">D13</span></span
+                >
+                <span class="device-state status-off" id="fan-state">Off</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header-row">
+              <div class="card-label">Outdoor Weather</div>
+              <div class="city-label" id="city-label">--</div>
+            </div>
+            <div class="weather-grid">
+              <div class="weather-stat">
+                <div class="ws-val" id="out-temp">--</div>
+                <div class="ws-label" id="out-temp-lbl">Temp °C</div>
+              </div>
+              <div class="weather-stat">
+                <div class="ws-val" id="out-feels">--</div>
+                <div class="ws-label">Feels Like</div>
+              </div>
+              <div class="weather-stat">
+                <div class="ws-val" id="out-humidity">--</div>
+                <div class="ws-label">Humidity %</div>
+              </div>
+              <div class="weather-stat">
+                <div class="ws-val" id="out-wind">--</div>
+                <div class="ws-label">Wind m/s</div>
+              </div>
+              <div class="weather-stat">
+                <div class="ws-val" id="out-pressure">--</div>
+                <div class="ws-label">Pressure hPa</div>
+              </div>
+              <div class="weather-stat">
+                <div class="ws-val ws-val--sm" id="out-conditions">--</div>
+                <div class="ws-label">Conditions</div>
+              </div>
+            </div>
+            <div class="city-search">
+              <input
+                class="city-input"
+                id="city-in"
+                placeholder="Sydney"
+                value="Sydney"
+              />
+              <button class="btn-sm" onclick="updateCity()">Update</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="row-2">
+          <div class="card">
+            <div class="card-label">AI Recommendation</div>
+            <div class="rec-box" id="ai-rec">Waiting for sensor data...</div>
+            <div class="stat-strip">
+              <div class="stat-item">
+                <div class="sv" id="temp-diff">--</div>
+                <div class="sk">Δ from target</div>
+              </div>
+              <div class="stat-item">
+                <div class="sv" id="mode-display">Auto</div>
+                <div class="sk">Mode</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-label">System Mode</div>
+            <div class="mode-row">
+              <strong id="mode-label">Automatic</strong>
+              <div class="mode-btns">
+                <button
+                  class="btn-mode active"
+                  id="btn-auto"
+                  onclick="setMode('auto')"
+                >
+                  Auto
+                </button>
+                <button
+                  class="btn-mode"
+                  id="btn-manual"
+                  onclick="setMode('manual')"
+                >
+                  Manual
+                </button>
+              </div>
+            </div>
+            <div class="manual-panel" id="manual" style="display: none">
+              <div class="manual-warn">Manual mode — direct device control</div>
+              <div class="manual-btns">
+                <button class="btn-device" onclick="manualControl('heater')">
+                  🔥 Heater
+                </button>
+                <button class="btn-device" onclick="manualControl('cooler')">
+                  ❄️ Cooler
+                </button>
+                <button class="btn-device" onclick="manualControl('fan')">
+                  💨 Inlet Fan
+                </button>
+                <button class="btn-device" onclick="manualControl('heater+fan')">
+                  🔥💨 Heater+Fan
+                </button>
+                <button class="btn-device" onclick="manualControl('cooler+fan')">
+                  ❄️💨 Cooler+Fan
+                </button>
+                <button class="btn-device" onclick="manualControl('off')">
+                  ⏹ All Off
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-label">
+            Temperature History <span class="label-note">— last 2 min</span>
+          </div>
+          <div class="chart-wrap">
+            <canvas id="temp-chart"></canvas>
+          </div>
+        </div>
+      </div>
+      <!-- /view-control -->
+
+      <div id="view-history" style="display: none">
+        <div class="card" style="margin-bottom: 12px">
+          <div class="card-header-row">
+            <div class="card-label">Temperature Timeline</div>
+            <div class="range-btns">
+              <button
+                class="btn-range active"
+                id="range-1h"
+                onclick="loadHistory('1h')"
+              >
+                1 hr
+              </button>
+              <button
+                class="btn-range"
+                id="range-6h"
+                onclick="loadHistory('6h')"
+              >
+                6 hr
+              </button>
+              <button
+                class="btn-range"
+                id="range-24h"
+                onclick="loadHistory('24h')"
+              >
+                24 hr
+              </button>
+              <button
+                class="btn-range"
+                id="range-7d"
+                onclick="loadHistory('7d')"
+              >
+                7 days
+              </button>
+            </div>
+          </div>
+          <div class="chart-wrap">
+            <canvas id="history-chart"></canvas>
+            <div id="chart-tooltip" class="chart-tooltip"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-label">HVAC Event Log</div>
+          <div id="history-summary" class="history-summary" style="display:none"></div>
+          <div id="event-log">
+            <div class="log-empty">No events recorded yet.</div>
+          </div>
+        </div>
+      </div>
+      <!-- /view-history -->
+
+      <div id="view-analysis" style="display: none">
+        <div class="card" style="margin-bottom: 12px">
+          <div class="card-label">Device Runtime — last 7 days</div>
+          <div class="chart-wrap" style="height: 220px">
+            <canvas id="runtime-chart"></canvas>
+          </div>
+        </div>
+        <div class="card" style="margin-bottom: 12px">
+          <div class="card-label">System Tuning</div>
+          <div class="control-row">
+            <div class="control-group">
+              <span class="control-label">Idle Band</span>
+              <div class="control-adj">
+                <button class="btn-adj" onclick="adjustIdleBand(-0.5)">−</button>
+                <span class="control-val" id="idle-band-2">±1.0°C</span>
+                <button class="btn-adj" onclick="adjustIdleBand(0.5)">+</button>
+              </div>
+            </div>
+          </div>
+          <div class="control-row" style="margin-top:10px">
+            <div class="control-group">
+              <span class="control-label">Momentum Factor</span>
+              <input class="cost-input" id="coast-factor" type="number" value="0.150" min="0.030" max="0.500" step="0.010" oninput="updateCoeff()" />
+            </div>
+            <div class="control-group">
+              <span class="control-label">Thermal Coeff</span>
+              <input class="cost-input" id="thermal-coeff" type="number" value="0.035" min="0.005" max="0.100" step="0.005" oninput="updateCoeff()" />
+            </div>
+            <div class="control-group">
+              <span class="control-label">Coast Direction</span>
+              <div class="control-adj">
+                <button class="btn-adj" onclick="adjustCoastAsymmetry(-0.1)">−</button>
+                <span class="control-val" id="coast-asymmetry-val">Neutral</span>
+                <button class="btn-adj" onclick="adjustCoastAsymmetry(0.1)">+</button>
+              </div>
+            </div>
+          </div>
+          <div class="tuning-hints">
+            <span><strong>Idle Band</strong> — how far the temperature can drift from the target before the system activates. Wider = fewer cycles, more drift. Narrower = tighter control, more cycles.</span>
+            <span><strong>Momentum Factor</strong> — scales how strongly the current rate of temperature change advances the shutoff point. Higher value = the system shuts off earlier when temperature is changing quickly, leaving thermal inertia to carry the rest. Auto-set from the outdoor/indoor gap each weather refresh.</span>
+            <span><strong>Thermal Coeff</strong> — scales how strongly the outdoor/indoor temperature difference advances the shutoff point. Higher value = earlier shutoff when there is a large gap between indoor and outdoor. Auto-set from outdoor humidity each weather refresh.</span>
+            <span><strong>Coast Direction</strong> — biases shutoff asymmetrically between heating and cooling. <em>Cool+</em> = cooling shuts off earlier and heating later, so the room coasts to slightly below target (summer preference). <em>Warm+</em> = heating shuts off earlier and cooling later, so the room coasts to slightly above target (winter preference). <em>Neutral</em> = symmetric shutoff.</span>
+          </div>
+        </div>
+
+        <div class="row-2">
+          <div class="card">
+            <div class="card-label">
+              Cost Estimate <span class="label-note">— optional</span>
+            </div>
+            <div class="control-row">
+              <div class="control-group">
+                <span class="control-label">Electricity ¢/kWh</span>
+                <input
+                  class="cost-input"
+                  id="cost-kwh"
+                  type="number"
+                  value="25"
+                  min="1"
+                  max="100"
+                  oninput="refreshInsights()"
+                />
+              </div>
+              <div class="control-group">
+                <span class="control-label">Heater W</span>
+                <input
+                  class="cost-input"
+                  id="watt-heater"
+                  type="number"
+                  value="1000"
+                  min="100"
+                  max="5000"
+                  oninput="refreshInsights()"
+                />
+              </div>
+              <div class="control-group">
+                <span class="control-label">Cooler / AC W</span>
+                <input
+                  class="cost-input"
+                  id="watt-cooler"
+                  type="number"
+                  value="1500"
+                  min="100"
+                  max="5000"
+                  oninput="refreshInsights()"
+                />
+              </div>
+              <div class="control-group">
+                <span class="control-label">Fan W</span>
+                <input
+                  class="cost-input"
+                  id="watt-fan"
+                  type="number"
+                  value="50"
+                  min="10"
+                  max="500"
+                  oninput="refreshInsights()"
+                />
+              </div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-label">Cost-Minimisation Insights</div>
+            <div class="rec-box" id="analysis-insights">
+              Switch to Analysis view to load data.
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- /view-analysis -->
+    </div>
+    <!-- /view-container -->
+  </div>
+  <!-- /app-layout -->
+
+  <script src="config.js"></script>
+  <script src="hvac_js.js"></script>
+</body>
+</html>

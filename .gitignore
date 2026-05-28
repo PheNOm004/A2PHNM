@@ -1,0 +1,3 @@
+flare/config.js
+*.env
+.env*
