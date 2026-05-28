@@ -389,7 +389,7 @@
             <div class="tuning-hints">
               <span><strong>Momentum Factor</strong> — °C of early shutoff per °C/hr of current temperature rate. At 0.25 (default), a room cooling at 2°C/hr shuts off 0.5°C before target and coasts the rest. Higher = shuts off earlier, relies more on inertia. Auto-set from outdoor/indoor gap.</span>
               <span><strong>Thermal Coeff</strong> — °C of early shutoff per °C of outdoor/indoor temperature gap. At 0.05, a 10°C gap adds 0.5°C to the shutoff margin (outdoor conditions keep pushing the room after appliance stops). Higher = more aggressive early shutoff. Auto-set from outdoor humidity.</span>
-              <span><strong>Coast Direction</strong> — <em>Cool+</em>: reduces cooling shutoff (system cools past target) and raises heating shutoff (heating stops short of target) — room trends cooler. <em>Warm+</em>: opposite — room trends warmer. Effect scales with Idle Band width: at ±100% the shutoff shifts by 40% of the band, which at 2°C band = ±0.8°C. Overshoot is allowed in the active direction. <em>Neutral</em> = symmetric.</span>
+              <span><strong>Coast Direction</strong> — <em>Cool+</em>: cooling cuts <strong>later</strong> (runs further toward/past target), heating cuts <strong>sooner</strong> (stops below target) — room settles lower than target. <em>Warm+</em>: cooling cuts <strong>earlier</strong> (stops above target), heating cuts <strong>later</strong> (runs past target) — room settles higher than target. Effect scales with Idle Band: at ±100% with a 2°C band the shift is ±0.8°C. <em>Neutral</em> = symmetric shutoff at the momentum-predicted point.</span>
             </div>
           </div>
         </div>
