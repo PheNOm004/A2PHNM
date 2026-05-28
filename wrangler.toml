@@ -1,0 +1,8 @@
+name = "thisphnmm"
+pages_build_output_dir = "flare"
+compatibility_date = "2025-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hvac-db"
+database_id = "FILL-IN-AFTER-wrangler-d1-create"

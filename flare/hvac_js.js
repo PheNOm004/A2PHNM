@@ -20,15 +20,16 @@ var MAX_HISTORY  = 60;          // 60 × 2 s = 2 min of live history
 var WEATHER_KEY = (typeof WEATHER_API_KEY !== 'undefined') ? WEATHER_API_KEY : '5732f6a4fa41c14b18de41eb88a325be';
 const FAN_MIN_RUN_MINS    = 10; // minimum fan run before appliance is added (fixed)
 
-// ── PocketBase ────────────────────────────────────────────────────
-// In a browser (Netlify): reads tunnel URL from localStorage.
-// In Linx/runlinc (no localStorage API): catches the error and falls back to localhost.
+// ── API base URL ──────────────────────────────────────────────────
+// Browser: uses the same origin as the page (works on localhost dev + production).
+// Linx runtime: localStorage throws, so falls back to the production URL.
 const PB = (function(){
     try {
         var u = localStorage.getItem('hvac_pb_url');
-        return (u && u.trim()) ? u.trim() : 'https://api.thisphnmm.com';
+        if (u && u.trim()) return u.trim();
+        return location.origin;
     } catch(e) {
-        return 'http://localhost:8090'; // Linx runtime — always local
+        return 'https://thisphnmm.com'; // Linx runtime — post to production
     }
 })();
 var settingsId    = null;
@@ -243,18 +244,6 @@ function manualControl(cmd) {
         manualDevice = 'fan';
         setBadge('cooling', 'Cooling');
         updateRec('Manual: Inlet fan on.', 'cool');
-    } else if (cmd === 'heater+fan') {
-        if (typeof turnOn !== 'undefined') { turnOn(RedLed); turnOn(InletFan); }
-        setDevice('heater', true, 'heat'); setDevice('fan', true, 'heat');
-        manualDevice = 'fan+heater';
-        setBadge('heating', 'Heating');
-        updateRec('Manual: Fan + Heater on.', 'heat');
-    } else if (cmd === 'cooler+fan') {
-        if (typeof turnOn !== 'undefined') { turnOn(GreenLed); turnOn(InletFan); }
-        setDevice('cooler', true, 'cool'); setDevice('fan', true, 'cool');
-        manualDevice = 'fan+ac';
-        setBadge('cooling', 'Cooling');
-        updateRec('Manual: Fan + AC on.', 'cool');
     } else {
         manualDevice = 'idle';
         setBadge('manual', 'Manual');
@@ -1126,9 +1115,8 @@ setInterval(fetchWeather, 300000);
                     setDevice('fan',    false, '');
                     setBadge('idle', 'Offline');
                     updateRec(
-                        '⚠ Last reading ' + ageStr + ' — worker not running. ' +
-                        'Last known indoor temp: <strong>' + tempStr(temp) + '</strong>. ' +
-                        'Run: node hvac-worker.js',
+                        '⚠ Last reading ' + ageStr + ' — device not sending data. ' +
+                        'Last known indoor: <strong>' + tempStr(temp) + '</strong>.',
                         'idle'
                     );
                 } else {

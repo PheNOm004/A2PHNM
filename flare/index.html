@@ -41,11 +41,6 @@
         <div class="modal-label">City (outdoor weather)</div>
         <input class="city-input" id="modal-city" placeholder="Sydney" />
       </div>
-      <div class="modal-field">
-        <div class="modal-label">PocketBase URL</div>
-        <input class="city-input" id="modal-pb-url" placeholder="http://localhost:8090" style="font-size:0.78rem;" />
-        <div style="font-size:0.7rem;color:var(--muted);margin-top:4px;">Leave blank for localhost. Set to your Cloudflare Tunnel URL when hosted remotely (e.g. https://api.thisphnmm.com).</div>
-      </div>
       <button class="btn-sm modal-start" onclick="saveSetup()">
         Start Dashboard
       </button>
@@ -254,12 +249,6 @@
                 </button>
                 <button class="btn-device" onclick="manualControl('fan')">
                   💨 Inlet Fan
-                </button>
-                <button class="btn-device" onclick="manualControl('heater+fan')">
-                  🔥💨 Heater+Fan
-                </button>
-                <button class="btn-device" onclick="manualControl('cooler+fan')">
-                  ❄️💨 Cooler+Fan
                 </button>
                 <button class="btn-device" onclick="manualControl('off')">
                   ⏹ All Off
