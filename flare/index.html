@@ -41,6 +41,11 @@
         <div class="modal-label">City (outdoor weather)</div>
         <input class="city-input" id="modal-city" placeholder="Sydney" />
       </div>
+      <div class="modal-field">
+        <div class="modal-label">PocketBase URL</div>
+        <input class="city-input" id="modal-pb-url" placeholder="http://localhost:8090" style="font-size:0.78rem;" />
+        <div style="font-size:0.7rem;color:var(--muted);margin-top:4px;">Leave blank for localhost. Set to your Cloudflare Tunnel URL when hosted remotely (e.g. https://api.thisphnmm.com).</div>
+      </div>
       <button class="btn-sm modal-start" onclick="saveSetup()">
         Start Dashboard
       </button>
@@ -250,12 +255,6 @@
                 <button class="btn-device" onclick="manualControl('fan')">
                   💨 Inlet Fan
                 </button>
-                <button class="btn-device" onclick="manualControl('heater+fan')">
-                  🔥💨 Heater+Fan
-                </button>
-                <button class="btn-device" onclick="manualControl('cooler+fan')">
-                  ❄️💨 Cooler+Fan
-                </button>
                 <button class="btn-device" onclick="manualControl('off')">
                   ⏹ All Off
                 </button>
@@ -343,30 +342,18 @@
                 <button class="btn-adj" onclick="adjustIdleBand(0.5)">+</button>
               </div>
             </div>
-          </div>
-          <div class="control-row" style="margin-top:10px">
             <div class="control-group">
-              <span class="control-label">Momentum Factor</span>
-              <input class="cost-input" id="coast-factor" type="number" value="0.150" min="0.030" max="0.500" step="0.010" oninput="updateCoeff()" />
-            </div>
-            <div class="control-group">
-              <span class="control-label">Thermal Coeff</span>
-              <input class="cost-input" id="thermal-coeff" type="number" value="0.035" min="0.005" max="0.100" step="0.005" oninput="updateCoeff()" />
-            </div>
-            <div class="control-group">
-              <span class="control-label">Coast Direction</span>
+              <span class="control-label">Shutoff Buffer</span>
               <div class="control-adj">
-                <button class="btn-adj" onclick="adjustCoastAsymmetry(-0.1)">−</button>
-                <span class="control-val" id="coast-asymmetry-val">Neutral</span>
-                <button class="btn-adj" onclick="adjustCoastAsymmetry(0.1)">+</button>
+                <button class="btn-adj" onclick="adjustShutoffBuffer(-0.1)">−</button>
+                <span class="control-val" id="shutoff-buffer-val">0.3°C</span>
+                <button class="btn-adj" onclick="adjustShutoffBuffer(0.1)">+</button>
               </div>
             </div>
           </div>
           <div class="tuning-hints">
             <span><strong>Idle Band</strong> — how far the temperature can drift from the target before the system activates. Wider = fewer cycles, more drift. Narrower = tighter control, more cycles.</span>
-            <span><strong>Momentum Factor</strong> — scales how strongly the current rate of temperature change advances the shutoff point. Higher value = the system shuts off earlier when temperature is changing quickly, leaving thermal inertia to carry the rest. Auto-set from the outdoor/indoor gap each weather refresh.</span>
-            <span><strong>Thermal Coeff</strong> — scales how strongly the outdoor/indoor temperature difference advances the shutoff point. Higher value = earlier shutoff when there is a large gap between indoor and outdoor. Auto-set from outdoor humidity each weather refresh.</span>
-            <span><strong>Coast Direction</strong> — biases shutoff asymmetrically between heating and cooling. <em>Cool+</em> = cooling shuts off earlier and heating later, so the room coasts to slightly below target (summer preference). <em>Warm+</em> = heating shuts off earlier and cooling later, so the room coasts to slightly above target (winter preference). <em>Neutral</em> = symmetric shutoff.</span>
+            <span><strong>Shutoff Buffer</strong> — how many degrees before the exact target the devices switch off. Set to 0 to run all the way to the target. Positive values cut devices early and let thermal momentum coast to the target, reducing overshoot. Negative values (down to −2°C) allow deliberate overshoot past the target before cutting out — useful when thermal mass is large. Must stay within the idle band.</span>
           </div>
         </div>
 

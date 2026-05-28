@@ -3,6 +3,7 @@ var isAutomatic  = true;        // true = auto mode, false = manual
 var hvacState    = 'idle';      // 'idle' | 'heating' | 'cooling'
 var targetTemp   = 22.0;        // desired indoor temp (always stored in °C)
 var idleBand     = 1.0;         // ±°C dead-band before HVAC activates
+var SHUTOFF_BUFFER = 0.3;       // °C before target to cut devices — thermal momentum carries the rest
 var outdoorTemp  = null;        // from OpenWeatherMap (°C)
 var outdoorFeels = null;
 var outdoorHum   = null;
@@ -12,51 +13,54 @@ var tempHistory  = [];          // ring buffer: { ts, temp, target }
 var isCelsius    = true;
 var MAX_HISTORY  = 60;          // 60 × 2 s = 2 min of live history
 
-var WEATHER_KEY = (typeof WEATHER_API_KEY !== 'undefined') ? WEATHER_API_KEY : '';
-var COAST_FACTOR          = 0.15;  // auto-updated from weather; fine-tunable by user
-var THERMAL_COEFF         = 0.035; // auto-updated from weather; fine-tunable by user
-var COAST_ASYMMETRY       = 0.0;   // -1 = warm bias, 0 = neutral, +1 = cool bias
-const FAN_MIN_RUN_MINS    = 10;    // minimum fan run before appliance is added (fixed)
+var WEATHER_KEY = (typeof WEATHER_API_KEY !== 'undefined') ? WEATHER_API_KEY : '5732f6a4fa41c14b18de41eb88a325be';
+const FAN_MIN_RUN_MINS    = 10; // minimum fan run before appliance is added (fixed)
 
 // ── PocketBase ────────────────────────────────────────────────────
-var PB = (typeof PB_URL !== 'undefined') ? PB_URL : 'http://localhost:8090';
-var settingsId    = null;   // record ID for PATCH calls
-var openEventId   = null;   // ID of the currently-open hvac_events record
-var prevHvacState    = 'idle'; // for state-transition detection in jsloop
-var fanStartTime     = null;   // Date.now() when current fan run started
-var outdoorWarmPolls = 0;      // consecutive weather fetches where outdoor >= indoor (cooling commitment guard)
-var outdoorCoolPolls = 0;      // consecutive weather fetches where outdoor <= indoor (heating commitment guard)
+// In a browser (Netlify): reads tunnel URL from localStorage.
+// In Linx/runlinc (no localStorage API): catches the error and falls back to localhost.
+const PB = (function(){
+    try {
+        var u = localStorage.getItem('hvac_pb_url');
+        return (u && u.trim()) ? u.trim() : 'https://api.thisphnmm.com';
+    } catch(e) {
+        return 'http://localhost:8090'; // Linx runtime — always local
+    }
+})();
+var settingsId    = null;
+var openEventId   = null;
+var prevHvacState    = 'idle';
+var fanStartTime     = null;
+var outdoorWarmPolls = 0;
+var outdoorCoolPolls = 0;
 var currentRange  = '1h';
-var analysisCache = [];     // last-fetched events (avoids re-fetch on input change)
-var manualDevice  = 'idle';    // tracks which device manualControl() last activated
-var lastKnownTemp = null;      // last parsed indoor temp — shared with event helpers
-var _histMeta     = null;      // geometry snapshot from last renderHistoryChart — used by hover tooltip
+var analysisCache = [];
+var manualDevice  = 'idle';
+var lastKnownTemp = null;
+var _histMeta     = null;
+var _dbTick       = 0;        // counts loop cycles; DB write happens every 15th (≈30 s)
+var _showDotLabels = true;    // show/hide temperature labels on event dots in history chart
 var STATE_COLORS  = {
-    heating:      '#f04040',
-    'fan+heater': '#f87060',
-    'fan-heat':   '#e09030',
-    cooling:      '#40a8f8',
-    'fan+ac':     '#2bc4d8',
-    fan:          '#24d09a',
-    idle:         '#4e6580'
+    heating:    '#f04040',
+    'fan-heat': '#e09030',
+    cooling:    '#40a8f8',
+    fan:        '#24d09a',
+    idle:       '#4e6580'
 };
 
-// Modal has its own temp/unit so changes can be discarded before confirming
 var modalTargetTemp = 22.0;
 var modalIsCelsius  = true;
 
 // ── Helpers ───────────────────────────────────────────────────────
 function $(id) { return document.getElementById(id); }
 
-// dispTemp: absolute conversion — adds 32 for °F (e.g. 22 °C → 71.6 °F)
-// dispDelta: difference conversion — only scales, no +32 (e.g. 2 °C → 3.6 °F)
 function dispTemp(c)  { return (isCelsius ? c : c*9/5+32).toFixed(1); }
 function dispDelta(d) { return (isCelsius ? d : d*9/5).toFixed(1); }
 function dispUnit()   { return isCelsius ? '°C' : '°F'; }
 function dispBand()   { return '±' + dispDelta(idleBand) + dispUnit(); }
+// Convenience: temperature value + unit in one string (e.g. "22.0°C")
+function tempStr(c)   { return dispTemp(c) + dispUnit(); }
 
-// Initialise and clear a canvas, returning { ctx, W, H } or null if not found.
-// Handles HiDPI scaling — call once per render, then draw with returned ctx/W/H.
 function initCanvas(id, fallbackH) {
     var c = $(id); if (!c) return null;
     var dpr = window.devicePixelRatio || 1;
@@ -70,7 +74,6 @@ function initCanvas(id, fallbackH) {
     return {ctx:ctx, W:W, H:H};
 }
 
-// Silent-fail PocketBase helpers
 function _pbHeaders() {
     var h = {'Content-Type': 'application/json'};
     if (typeof PB_API_TOKEN !== 'undefined' && PB_API_TOKEN) h['Authorization'] = 'Bearer ' + PB_API_TOKEN;
@@ -87,6 +90,12 @@ function pbPatch(path, body) {
 
 // ── Unit toggle ───────────────────────────────────────────────────
 function setUnit(celsius) {
+    if (isCelsius === celsius) {
+        // Clicking the already-active unit button toggles dot labels on the history chart
+        _showDotLabels = !_showDotLabels;
+        if ($('view-history').style.display !== 'none') loadHistory(currentRange);
+        return;
+    }
     isCelsius = celsius;
     $('btn-c').className = 'unit-opt' + (celsius  ? ' active' : '');
     $('btn-f').className = 'unit-opt' + (!celsius ? ' active' : '');
@@ -105,7 +114,6 @@ function setMode(mode) {
     if (!isAutomatic && mode === 'manual') return;
     if (isAutomatic  && mode === 'auto')   return;
     if (mode === 'manual') {
-        // Close any open auto-mode event before handing over control
         if (prevHvacState !== 'idle') closeHvacEvent(lastKnownTemp);
         isAutomatic = false;
         hvacState = 'idle';
@@ -115,7 +123,6 @@ function setMode(mode) {
         $('mode-display').innerText = 'Manual';
         updateRec('Manual mode — device control active. AI monitoring continues.', '');
     } else {
-        // Close any open manual-mode event before returning to auto
         if (manualDevice !== 'idle') closeHvacEvent(lastKnownTemp);
         isAutomatic = true;
         manualDevice = 'idle';
@@ -128,62 +135,35 @@ function setMode(mode) {
     $('manual').style.display = isAutomatic ? 'none' : 'block';
 }
 
-// ── Target & band ─────────────────────────────────────────────────
-// Clamps to 10–35 °C, snaps to nearest 0.5 °C
+// ── Target, band & shutoff buffer ─────────────────────────────────
 function adjustTarget(delta) {
     targetTemp = Math.max(10, Math.min(35, Math.round((targetTemp+delta)*2)/2));
     $('target-temp').innerText = dispTemp(targetTemp) + dispUnit();
     patchSettings();
 }
 
-// Clamps to 0.5–3.0 °C
 function adjustIdleBand(delta) {
     idleBand = Math.max(0.5, Math.min(3.0, Math.round((idleBand+delta)*2)/2));
+    SHUTOFF_BUFFER = parseFloat(Math.min(SHUTOFF_BUFFER, Math.max(-2, idleBand - 0.2)).toFixed(1));
     $('idle-band').innerText = dispBand();
     var el2=$('idle-band-2'); if (el2) el2.innerText=dispBand();
+    var sbEl=$('shutoff-buffer-val'); if (sbEl) sbEl.innerText=dispDelta(SHUTOFF_BUFFER)+dispUnit();
     patchSettings();
 }
 
-// Manual override for auto-calculated weather coefficients
-function updateCoeff() {
-    var cf=parseFloat(($('coast-factor')||{}).value);
-    var tc=parseFloat(($('thermal-coeff')||{}).value);
-    if (!isNaN(cf)&&cf>0) COAST_FACTOR=parseFloat(cf.toFixed(3));
-    if (!isNaN(tc)&&tc>0) THERMAL_COEFF=parseFloat(tc.toFixed(3));
-    patchSettings();
-}
-
-// Coasting direction bias: -1 = warm-biased, 0 = neutral, +1 = cool-biased
-function coastAsymmetryLabel() {
-    if (Math.abs(COAST_ASYMMETRY) < 0.05) return 'Neutral';
-    var pct = Math.abs(Math.round(COAST_ASYMMETRY * 100));
-    return COAST_ASYMMETRY > 0 ? 'Cool +' + pct + '%' : 'Warm +' + pct + '%';
-}
-function adjustCoastAsymmetry(delta) {
-    COAST_ASYMMETRY = Math.max(-1.0, Math.min(1.0, Math.round((COAST_ASYMMETRY + delta) * 10) / 10));
-    var el=$('coast-asymmetry-val'); if (el) el.innerText=coastAsymmetryLabel();
-    patchSettings();
-}
-
-// Auto-calculates shutoff coefficients from live outdoor data.
-// Called every time weather is successfully fetched (every 5 min).
-// COAST_FACTOR: larger outdoor/indoor gap → more thermal momentum → shut off sooner
-// THERMAL_COEFF: higher humidity → better wall heat-transfer → wider shutoff margin
-function updateCoeffsFromWeather() {
-    var indoorRef = lastKnownTemp !== null ? lastKnownTemp : targetTemp;
-    var diff = Math.abs(outdoorTemp - indoorRef);
-    // 0.050 at 0°C gap → 0.150 at 10°C gap (default) → 0.300 at 25°C gap
-    COAST_FACTOR  = parseFloat(Math.max(0.050, Math.min(0.300, 0.050 + diff * 0.010)).toFixed(3));
-    // 0.010 at 0% humidity → 0.035 at 50% (default) → 0.060 at 100%
-    THERMAL_COEFF = parseFloat(Math.max(0.010, Math.min(0.060, 0.010 + (outdoorHum||50)/100 * 0.050)).toFixed(3));
-    // Sync input displays so user can see the auto-calculated values
-    var cfEl=$('coast-factor'); if (cfEl) cfEl.value=COAST_FACTOR.toFixed(3);
-    var tcEl=$('thermal-coeff'); if (tcEl) tcEl.value=THERMAL_COEFF.toFixed(3);
+function adjustShutoffBuffer(delta) {
+    // Clamp -2.0–(idleBand - 0.2). Negative values let the system overshoot the target before cutting out.
+    SHUTOFF_BUFFER = parseFloat(Math.max(-2, Math.min(idleBand - 0.2, Math.round((SHUTOFF_BUFFER + delta) * 10) / 10)).toFixed(1));
+    var el=$('shutoff-buffer-val'); if (el) el.innerText=dispDelta(SHUTOFF_BUFFER)+dispUnit();
     patchSettings();
 }
 
 // ── Manual control ────────────────────────────────────────────────
-function allOff() { [RedLed, GreenLed, InletFan].forEach(turnOff); }
+// allOff guards against browser environments where Linx GPIO is unavailable
+function allOff() {
+    if (typeof turnOff !== 'undefined')
+        [RedLed, GreenLed, InletFan].forEach(turnOff);
+}
 
 function manualControl(cmd) {
     if (isAutomatic) { alert('Switch to Manual mode first.'); return; }
@@ -191,39 +171,23 @@ function manualControl(cmd) {
     allOff();
     ['heater','cooler','fan'].forEach(function(d) { setDevice(d, false, ''); });
     if (cmd === 'heater') {
-        turnOn(RedLed);
+        if (typeof turnOn !== 'undefined') turnOn(RedLed);
         setDevice('heater', true, 'heat');
         manualDevice = 'heating';
         setBadge('heating', 'Heating');
         updateRec('Manual: Heater on.', 'heat');
     } else if (cmd === 'cooler') {
-        turnOn(GreenLed);
+        if (typeof turnOn !== 'undefined') turnOn(GreenLed);
         setDevice('cooler', true, 'cool');
         manualDevice = 'cooling';
         setBadge('cooling', 'Cooling');
         updateRec('Manual: Cooler / AC on.', 'cool');
     } else if (cmd === 'fan') {
-        turnOn(InletFan);
+        if (typeof turnOn !== 'undefined') turnOn(InletFan);
         setDevice('fan', true, 'cool');
         manualDevice = 'fan';
         setBadge('cooling', 'Cooling');
         updateRec('Manual: Inlet fan on.', 'cool');
-    } else if (cmd === 'heater+fan') {
-        turnOn(RedLed);
-        turnOn(InletFan);
-        setDevice('heater', true, 'heat');
-        setDevice('fan', true, 'heat');
-        manualDevice = 'fan+heater';
-        setBadge('heating', 'Heating');
-        updateRec('Manual: Fan + Heater on.', 'heat');
-    } else if (cmd === 'cooler+fan') {
-        turnOn(GreenLed);
-        turnOn(InletFan);
-        setDevice('cooler', true, 'cool');
-        setDevice('fan', true, 'cool');
-        manualDevice = 'fan+ac';
-        setBadge('cooling', 'Cooling');
-        updateRec('Manual: Fan + AC on.', 'cool');
     } else {
         manualDevice = 'idle';
         setBadge('manual', 'Manual');
@@ -234,7 +198,6 @@ function manualControl(cmd) {
 }
 
 // ── DOM helpers ───────────────────────────────────────────────────
-// setDevice: 'heater' targets #heater and #heater-state
 function setDevice(name, active, type) {
     $(name).className = 'device-item' + (active ? (type==='heat' ? ' active-heat' : ' active-cool') : '');
     var s = $(name+'-state');
@@ -247,7 +210,6 @@ function setBadge(type, label) {
     $('system-badge').innerText = label;
 }
 
-// type: 'heat' | 'cool' | 'idle' | '' — sets the coloured left-border style
 function updateRec(msg, type) {
     var el = $('ai-rec');
     el.innerHTML = msg;
@@ -261,7 +223,7 @@ function humLabel(h) {
 // ── Live history & 2-min chart ────────────────────────────────────
 function addToHistory(temp) {
     tempHistory.push({ts:Date.now(), temp:temp, target:targetTemp});
-    if (tempHistory.length > MAX_HISTORY) tempHistory.shift(); // keep buffer bounded
+    if (tempHistory.length > MAX_HISTORY) tempHistory.shift();
     renderChart();
 }
 
@@ -272,19 +234,16 @@ function renderChart() {
     var pad={top:16,right:16,bottom:28,left:46};
     var cW=W-pad.left-pad.right, cH=H-pad.top-pad.bottom, n=tempHistory.length;
 
-    // Convert stored °C to display unit at render time
     var vals = tempHistory.map(function(h) {
         return {temp:isCelsius?h.temp:h.temp*9/5+32, target:isCelsius?h.target:h.target*9/5+32};
     });
 
-    // Auto-scale Y: pad ±0.5 around actual range; guard against flat line (range=0)
     var allV = vals.map(function(v){return v.temp;}).concat(vals.map(function(v){return v.target;}));
     var minV=Math.min.apply(null,allV)-0.5, maxV=Math.max.apply(null,allV)+0.5, range=(maxV-minV)||1;
 
     function xOf(i) { return pad.left + (i/(n-1))*cW; }
     function yOf(v) { return pad.top  + cH - ((v-minV)/range)*cH; }
 
-    // Grid lines
     ctx.strokeStyle='#1c2840'; ctx.lineWidth=1;
     ctx.fillStyle='#4e6580'; ctx.font='10px system-ui'; ctx.textAlign='right';
     for (var i=0; i<=4; i++) {
@@ -293,7 +252,6 @@ function renderChart() {
         ctx.fillText(gv.toFixed(1)+'°', pad.left-4, gy+4);
     }
 
-    // Target line (dashed teal), then indoor temp line (solid white)
     function drawLine(color, lw, dash, getter) {
         ctx.strokeStyle=color; ctx.lineWidth=lw; ctx.setLineDash(dash||[]);
         ctx.beginPath();
@@ -303,7 +261,6 @@ function renderChart() {
     drawLine('#11c8b5', 1.5, [5,4], function(v){return v.target;});
     drawLine('#ccd6e8', 2,   [],    function(v){return v.temp;});
 
-    // X-axis time labels ("now", "-10s", etc.)
     var now=Date.now();
     ctx.fillStyle='#4e6580'; ctx.font='9px system-ui'; ctx.textAlign='center';
     [0,0.25,0.5,0.75,1].forEach(function(f){
@@ -311,7 +268,6 @@ function renderChart() {
         ctx.fillText(ago<3?'now':'-'+ago+'s', xOf(idx), H-6);
     });
 
-    // Legend
     ctx.textAlign='left'; ctx.font='10px system-ui';
     [['#ccd6e8','Indoor',4],['#11c8b5','Target',80]].forEach(function(l){
         ctx.fillStyle=l[0]; ctx.fillRect(pad.left+l[2], pad.top+4, 12,3);
@@ -320,19 +276,14 @@ function renderChart() {
 }
 
 // ── Weather ───────────────────────────────────────────────────────
-// Always fetches metric (°C) — conversion happens at display time
 async function fetchWeather() {
     try {
         var city = ($('city-in').value.trim() || currentCity).replace(/\s*,\s*/g,',');
-        // Normalise "Liverpool, AU" → "Liverpool,AU" so OWM parses the country code correctly.
-        // Preserve user's query as currentCity (not d.name) so country code survives auto-refresh.
         var r = await fetch('https://api.openweathermap.org/data/2.5/weather?q='+encodeURIComponent(city)+'&appid='+WEATHER_KEY+'&units=metric');
         if (!r.ok) return;
         var d = await r.json();
         currentCity=city; outdoorTemp=d.main.temp; outdoorFeels=d.main.feels_like;
         outdoorHum=d.main.humidity; outdoorDesc=d.weather[0].description;
-        // Track consecutive polls where outdoor is not cooler than indoor —
-        // used by the fan commitment window to confirm a genuine temp crossover.
         var indoorRef = tempHistory.length > 0 ? tempHistory[tempHistory.length-1].temp : targetTemp;
         outdoorWarmPolls = (outdoorTemp >= indoorRef) ? outdoorWarmPolls + 1 : 0;
         outdoorCoolPolls = (outdoorTemp <= indoorRef) ? outdoorCoolPolls + 1 : 0;
@@ -346,7 +297,6 @@ async function fetchWeather() {
         $('out-conditions').innerText = cap(outdoorDesc);
         $('out-temp-lbl').innerText = 'Temp '+dispUnit();
         var inp=$('city-in'); inp.value=''; inp.placeholder=d.name+', '+d.sys.country;
-        updateCoeffsFromWeather(); // recalculate shutoff tuning from fresh outdoor data
     } catch(e) {}
 }
 
@@ -354,19 +304,23 @@ function updateCity() { fetchWeather(); }
 
 // ── PocketBase: settings ──────────────────────────────────────────
 async function loadSettings() {
+    // Pre-fill the PB URL field in the setup modal with whatever is currently saved
+    var pbField = $('modal-pb-url');
+    if (pbField) {
+        var saved = localStorage.getItem('hvac_pb_url');
+        if (saved) pbField.value = saved;
+    }
     try {
         var r = await fetch(PB+'/api/collections/settings/records?perPage=1');
-        if (!r.ok) return;
+        if (!r.ok) { $('setup-modal').style.display = 'flex'; return; }
         var d = await r.json();
         if (d.totalItems === 0) {
-            $('setup-modal').style.display = 'flex'; // first run
+            $('setup-modal').style.display = 'flex';
         } else {
             var s=d.items[0];
             settingsId=s.id; targetTemp=s.target_temp||targetTemp; idleBand=s.idle_band||idleBand;
             isCelsius = s.is_celsius !== undefined ? s.is_celsius : isCelsius;
-            if (s.coast_factor         != null) COAST_FACTOR          = s.coast_factor;
-            if (s.thermal_coeff        != null) THERMAL_COEFF         = s.thermal_coeff;
-            if (s.coast_asymmetry      != null) COAST_ASYMMETRY       = s.coast_asymmetry;
+            if (s.shutoff_buffer != null) SHUTOFF_BUFFER = s.shutoff_buffer;
             if (s.cost_kwh    != null) { var el=$('cost-kwh');    if (el) el.value=s.cost_kwh;    }
             if (s.watt_heater != null) { var el=$('watt-heater'); if (el) el.value=s.watt_heater; }
             if (s.watt_cooler != null) { var el=$('watt-cooler'); if (el) el.value=s.watt_cooler; }
@@ -376,9 +330,7 @@ async function loadSettings() {
             $('target-temp').innerText = dispTemp(targetTemp)+dispUnit();
             $('idle-band').innerText   = dispBand();
             var ib2=$('idle-band-2');   if (ib2) ib2.innerText=dispBand();
-            var cfEl=$('coast-factor');   if (cfEl) cfEl.value=COAST_FACTOR.toFixed(3);
-            var tcEl=$('thermal-coeff');  if (tcEl) tcEl.value=THERMAL_COEFF.toFixed(3);
-            var caEl=$('coast-asymmetry-val'); if (caEl) caEl.innerText=coastAsymmetryLabel();
+            var sbEl=$('shutoff-buffer-val'); if (sbEl) sbEl.innerText=dispDelta(SHUTOFF_BUFFER)+dispUnit();
         }
     } catch(e) {}
 }
@@ -391,7 +343,7 @@ async function patchSettings() {
     var wF  = parseFloat(($('watt-fan')   ||{}).value) || 50;
     pbPatch('/api/collections/settings/records/'+settingsId, {
         target_temp:targetTemp, idle_band:idleBand, is_celsius:isCelsius,
-        coast_factor:COAST_FACTOR, thermal_coeff:THERMAL_COEFF, coast_asymmetry:COAST_ASYMMETRY,
+        shutoff_buffer:SHUTOFF_BUFFER,
         cost_kwh:kwh, watt_heater:wH, watt_cooler:wC, watt_fan:wF
     });
 }
@@ -411,10 +363,19 @@ function modalSetUnit(celsius) {
 
 async function saveSetup() {
     var city=($('modal-city').value.trim()||'Sydney').replace(/\s*,\s*/g,',');
+    // Save PocketBase URL to localStorage so it persists across page loads
+    var pbInput = $('modal-pb-url');
+    if (pbInput) {
+        var pbVal = pbInput.value.trim().replace(/\/$/, ''); // strip trailing slash
+        if (pbVal) localStorage.setItem('hvac_pb_url', pbVal);
+        else localStorage.removeItem('hvac_pb_url');
+        // Reload page so the new PB constant takes effect (it's evaluated at startup)
+        if (pbVal && pbVal !== PB) { localStorage.setItem('hvac_pb_url', pbVal); location.reload(); return; }
+    }
     try {
         var r = await pbPost('/api/collections/settings/records', {
             target_temp:modalTargetTemp, idle_band:idleBand, city:city, is_celsius:modalIsCelsius,
-            coast_factor:COAST_FACTOR, thermal_coeff:THERMAL_COEFF, coast_asymmetry:COAST_ASYMMETRY,
+            shutoff_buffer:SHUTOFF_BUFFER,
             cost_kwh:25, watt_heater:1000, watt_cooler:1500, watt_fan:50
         });
         if (r) settingsId = (await r.json()).id;
@@ -430,7 +391,6 @@ async function saveSetup() {
 // ── Sidebar ───────────────────────────────────────────────────────
 function toggleSidebar() { $('sidebar').classList.toggle('collapsed'); }
 
-// Show one view, hide the others, load data on demand
 function showView(name) {
     ['control','history','analysis'].forEach(function(v) {
         $('view-'+v).style.display = v===name ? '' : 'none';
@@ -450,7 +410,7 @@ async function openHvacEvent(type, temp) {
 
 async function closeHvacEvent(temp) {
     if (!openEventId) return;
-    var id=openEventId; openEventId=null; // clear immediately to prevent double-close
+    var id=openEventId; openEventId=null;
     try {
         var resp = await fetch(PB+'/api/collections/hvac_events/records/'+id);
         if (!resp.ok) return;
@@ -474,23 +434,31 @@ async function loadHistory(range) {
     else if (range==='24h') from.setDate(now.getDate()-1);
     else                     from.setDate(now.getDate()-7);
 
-    // PocketBase filter format: 'ts>="2026-05-18 10:00:00"' — readings use explicit ts field
     var fStr=from.toISOString().replace('T',' ').slice(0,19);
-    // For 1h: sort newest-first so the perPage cap gives us the most-recent data; reverse client-side.
-    // For longer ranges: sort oldest-first to spread 500 samples evenly across the window.
-    var readSort = range==='1h' ? '-ts' : 'ts';
+    var readFilter = encodeURIComponent('ts>="'+fStr+'"');
+    var evFilter   = encodeURIComponent('ts_start>="'+fStr+'"');
     try {
-        var res = await Promise.all([
-            fetch(PB+'/api/collections/readings/records?sort='+readSort+'&perPage=500&filter='+encodeURIComponent('ts>="'+fStr+'"')).then(function(r){return r.json();}),
-            fetch(PB+'/api/collections/hvac_events/records?sort=ts_start&perPage=500&filter='+encodeURIComponent('ts_start>="'+fStr+'"')).then(function(r){return r.json();})
-        ]);
-        var readItems = res[0].items||[];
-        if (range==='1h') readItems = readItems.reverse(); // restore chronological order
-        var evItems = res[1].items||[];
+        var readItems, evItems;
+        // Readings are written every ~30 s: 1h≈120, 6h≈720, 24h≈2880, 7d≈20160 records.
+        // Fetch enough pages (sort=-ts, oldest→newest after combine) to cover each window.
+        // 7d uses 10 pages (5000 records ≈ 42 h dense coverage; sparse older data still renders).
+        var pageCount = range==='1h' ? 1 : range==='6h' ? 2 : range==='24h' ? 6 : 10;
+        var pageNums = []; for (var _p=1; _p<=pageCount; _p++) pageNums.push(_p);
+        var pages = await Promise.all(pageNums.map(function(pg) {
+            return fetch(PB+'/api/collections/readings/records?sort=-ts&page='+pg+'&perPage=500&filter='+readFilter)
+                .then(function(r){return r.json();});
+        }));
+        // Combine all pages then sort ascending by ts.
+        // (sort=-ts means each page's items are newest→oldest internally; sorting after combine is simpler and correct.)
+        readItems = [];
+        for (var _i=0; _i<pages.length; _i++) readItems = readItems.concat(pages[_i].items||[]);
+        readItems.sort(function(a,b){ return new Date(a.ts).getTime()-new Date(b.ts).getTime(); });
+        var evRes = await fetch(PB+'/api/collections/hvac_events/records?sort=ts_start&perPage=500&filter='+evFilter).then(function(r){return r.json();});
+        evItems = evRes.items||[];
         renderHistoryChart(readItems, evItems);
         renderHistorySummary(readItems, evItems);
         attachHistoryTooltip();
-        renderEventLog(evItems.slice().reverse()); // event log shows newest first
+        renderEventLog(evItems.slice().reverse());
     } catch(e) {
         $('event-log').innerHTML='<div class="log-empty">PocketBase offline — start pocketbase.exe to enable history.</div>';
     }
@@ -507,7 +475,6 @@ function renderHistoryChart(readings, events) {
     var pad={top:22,right:16,bottom:32,left:46};
     var cW=W-pad.left-pad.right, cH=H-pad.top-pad.bottom;
 
-    // Null-guard target_temp: fall back to current targetTemp so NaN never enters Y-scale
     var vals=readings.map(function(r){
         var tgt = r.target_temp != null ? r.target_temp : targetTemp;
         return {
@@ -516,6 +483,15 @@ function renderHistoryChart(readings, events) {
             target: isCelsius ? tgt : tgt*9/5+32
         };
     });
+
+    // Thin to at most one point per 2px — prevents clustering on dense historical data
+    var maxPts = Math.max(80, Math.floor(cW / 2));
+    if (vals.length > maxPts) {
+        var _step = vals.length / maxPts, _thinned = [];
+        for (var _ti=0; _ti<maxPts; _ti++) _thinned.push(vals[Math.min(vals.length-1, Math.round(_ti*_step))]);
+        vals = _thinned;
+    }
+
     var minTs=vals[0].ts, maxTs=vals[vals.length-1].ts, tsRange=maxTs-minTs||1;
     var allV=vals.map(function(v){return v.temp;}).concat(vals.map(function(v){return v.target;}));
     var minV=Math.min.apply(null,allV)-0.5, vRange=(Math.max.apply(null,allV)+0.5-minV)||1;
@@ -523,26 +499,22 @@ function renderHistoryChart(readings, events) {
     function xOf(ts){ return pad.left+((ts-minTs)/tsRange)*cW; }
     function yOf(v) { return pad.top+cH-((v-minV)/vRange)*cH; }
 
-    // Unified color palette — matches CSS custom properties and badge/device colors
     var SC = STATE_COLORS;
     function scAlpha(hex) {
         var r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);
         return 'rgba('+r+','+g+','+b+',0.13)';
     }
 
-    // Pre-parse event timestamps once
     var evParsed=events.map(function(ev){
         return {type:ev.type, s:new Date(ev.ts_start).getTime(), e:ev.ts_end?new Date(ev.ts_end).getTime():maxTs, start_temp:ev.start_temp, end_temp:ev.end_temp};
     });
 
-    // Coloured background bands
     evParsed.forEach(function(ev){
         var x0=xOf(Math.max(minTs,ev.s)), x1=xOf(Math.min(maxTs,ev.e));
         ctx.fillStyle=scAlpha(SC[ev.type]||SC.cooling);
         ctx.fillRect(x0, pad.top, Math.max(1,x1-x0), cH);
     });
 
-    // Grid lines + Y-axis labels
     ctx.strokeStyle='#1c2840'; ctx.lineWidth=1;
     ctx.fillStyle='#4e6580'; ctx.font='10px system-ui'; ctx.textAlign='right';
     for (var gi=0; gi<=4; gi++) {
@@ -551,7 +523,6 @@ function renderHistoryChart(readings, events) {
         ctx.fillText(gv.toFixed(1)+'°', pad.left-4, gy+4);
     }
 
-    // X-axis time labels — tick interval and format depend on range
     var tickMs = currentRange==='1h'?900000:currentRange==='6h'?3600000:currentRange==='24h'?14400000:86400000;
     var firstTick = Math.ceil(minTs/tickMs)*tickMs;
     ctx.fillStyle='#4e6580'; ctx.font='9px system-ui'; ctx.textAlign='center';
@@ -566,15 +537,14 @@ function renderHistoryChart(readings, events) {
         ctx.beginPath(); ctx.moveTo(tx,pad.top+cH); ctx.lineTo(tx,pad.top+cH+4); ctx.stroke();
     }
 
-    // Target line — step-connect readings so target changes show as jumps, not diagonals
     var prevTgt=null;
     ctx.strokeStyle='#f59e0b'; ctx.lineWidth=1.5; ctx.setLineDash([5,4]);
     ctx.beginPath();
     vals.forEach(function(v,i){
         if (i===0) { ctx.moveTo(xOf(v.ts),yOf(v.target)); }
         else if (v.target !== prevTgt) {
-            ctx.lineTo(xOf(v.ts),yOf(prevTgt)); // horizontal until this point
-            ctx.lineTo(xOf(v.ts),yOf(v.target)); // then step vertically
+            ctx.lineTo(xOf(v.ts),yOf(prevTgt));
+            ctx.lineTo(xOf(v.ts),yOf(v.target));
         } else {
             ctx.lineTo(xOf(v.ts),yOf(v.target));
         }
@@ -582,9 +552,6 @@ function renderHistoryChart(readings, events) {
     });
     ctx.stroke(); ctx.setLineDash([]);
 
-    // Indoor temp line — colored by dominant HVAC state within each segment.
-    // For each segment find the event with the most time overlap; if it covers any of the
-    // segment, use that color — ensures line matches background bands consistently.
     function stateForSegment(ts0, ts1) {
         var bestType='idle', bestOverlap=0;
         for (var j=0; j<evParsed.length; j++) {
@@ -602,12 +569,13 @@ function renderHistoryChart(readings, events) {
         ctx.stroke();
     }
 
-    // Legend — top-left, inside top padding
     var legendItems=[
         {c:'#f59e0b',dash:true,l:'Target'},
-        {c:SC.heating,l:'Heating'},{c:SC['fan+heater'],l:'Fan+Heater'},
-        {c:SC['fan-heat'],l:'Fan(heat)'},{c:SC.cooling,l:'AC'},
-        {c:SC['fan+ac'],l:'Fan+AC'},{c:SC.fan,l:'Fan(cool)'},{c:SC.idle,l:'Idle'}
+        {c:SC.heating,l:'Heating'},
+        {c:SC['fan-heat'],l:'Fan(heat)'},
+        {c:SC.cooling,l:'AC'},
+        {c:SC.fan,l:'Fan(cool)'},
+        {c:SC.idle,l:'Idle'}
     ];
     ctx.font='9px system-ui'; ctx.lineWidth=1.5;
     var lx=pad.left+2, ly=11;
@@ -619,8 +587,11 @@ function renderHistoryChart(readings, events) {
         ctx.fillText(it.l, lx+14, ly+3);
         lx+=14+ctx.measureText(it.l).width+8;
     });
+    // Dot-label hint — right-aligned in the legend row
+    var hintTxt = _showDotLabels ? '● labels on' : '○ labels off';
+    ctx.font='8px system-ui'; ctx.fillStyle='#4e6580'; ctx.textAlign='right';
+    ctx.fillText('click °C/°F to toggle  ' + hintTxt, pad.left+cW, ly+3);
 
-    // Dot + temp label at each event boundary
     evParsed.forEach(function(ev){
         var color=SC[ev.type]||SC.idle;
         function mark(ts, temp, above) {
@@ -630,8 +601,10 @@ function renderHistoryChart(readings, events) {
             ctx.beginPath(); ctx.arc(mx,my,4,0,Math.PI*2);
             ctx.fillStyle=color; ctx.fill();
             ctx.strokeStyle='#0c1220'; ctx.lineWidth=1.5; ctx.stroke();
-            ctx.fillStyle=color; ctx.font='bold 9px system-ui'; ctx.textAlign='center';
-            ctx.fillText((isCelsius?temp:temp*9/5+32).toFixed(1)+'°', mx, Math.max(pad.top+10,Math.min(H-pad.bottom-4,my+(above?-8:14))));
+            if (_showDotLabels) {
+                ctx.fillStyle=color; ctx.font='bold 9px system-ui'; ctx.textAlign='center';
+                ctx.fillText((isCelsius?temp:temp*9/5+32).toFixed(1)+'°', mx, Math.max(pad.top+10,Math.min(H-pad.bottom-4,my+(above?-8:14))));
+            }
         }
         mark(ev.s, ev.start_temp, true);
         if (ev.e<maxTs) mark(ev.e, ev.end_temp, false);
@@ -710,11 +683,8 @@ function attachHistoryTooltip() {
 
 // ── Analysis view ─────────────────────────────────────────────────
 async function loadAnalysis() {
-    // Sync all tuning controls to current runtime values
     var ib2=$('idle-band-2');   if (ib2) ib2.innerText=dispBand();
-    var cfEl=$('coast-factor');   if (cfEl) cfEl.value=COAST_FACTOR.toFixed(3);
-    var tcEl=$('thermal-coeff');  if (tcEl) tcEl.value=THERMAL_COEFF.toFixed(3);
-    var caEl=$('coast-asymmetry-val'); if (caEl) caEl.innerText=coastAsymmetryLabel();
+    var sbEl=$('shutoff-buffer-val'); if (sbEl) sbEl.innerText=dispDelta(SHUTOFF_BUFFER)+dispUnit();
 
     var from=new Date(); from.setDate(from.getDate()-7);
     var fStr=from.toISOString().replace('T',' ').slice(0,19);
@@ -726,16 +696,13 @@ async function loadAnalysis() {
     buildInsights(analysisCache);
 }
 
-// Grouped bar chart: one group per day, three bars (heater/AC/fan) in minutes
 function renderRuntimeChart(events) {
     var cv=initCanvas('runtime-chart',220); if (!cv) return;
     var ctx=cv.ctx, W=cv.W, H=cv.H;
 
-    // Last 7 calendar days as YYYY-MM-DD strings
     var days=[];
     for (var i=6; i>=0; i--) { var d=new Date(); d.setDate(d.getDate()-i); days.push(d.toISOString().slice(0,10)); }
 
-    // Accumulate runtime minutes per device type per day
     var totals={};
     days.forEach(function(day){totals[day]={heating:0,cooling:0,fan:0};});
     events.forEach(function(ev){
@@ -754,7 +721,6 @@ function renderRuntimeChart(events) {
     var cW=W-pad.left-pad.right, cH=H-pad.top-pad.bottom;
     var groupW=cW/days.length, barW=groupW*0.65, subW=barW/3;
 
-    // Y-axis grid (labels in minutes)
     ctx.strokeStyle='#1c2840'; ctx.lineWidth=1;
     ctx.fillStyle='#4e6580'; ctx.font='10px system-ui'; ctx.textAlign='right';
     for (var gi=0; gi<=4; gi++) {
@@ -775,7 +741,6 @@ function renderRuntimeChart(events) {
         ctx.fillText(day.slice(5), cx, H-8);
     });
 
-    // Legend — fan teal, AC blue, heater red (matches bar colours)
     ctx.textAlign='left'; ctx.font='9px system-ui'; var lx=pad.left;
     [['Heater','#f04040'],['AC (costly)','#40a8f8'],['Inlet Fan','#24d09a']].forEach(function(l){
         ctx.fillStyle=l[1]; ctx.fillRect(lx,pad.top+2,10,3);
@@ -783,11 +748,8 @@ function renderRuntimeChart(events) {
     });
 }
 
-// Re-runs insights and persists cost values whenever any cost input changes
 function refreshInsights() { buildInsights(analysisCache); patchSettings(); }
 
-// Generates cost-minimisation insights from event data.
-// Relay costs: heater relay → wHeat, cooler relay → wCool, fan relay → wFan (fan+ac runs both)
 function buildInsights(events) {
     var el=$('analysis-insights');
     if (!events.length) {
@@ -798,24 +760,29 @@ function buildInsights(events) {
     var wHeat=parseFloat($('watt-heater').value)||1000;
     var wCool=parseFloat($('watt-cooler').value)||1500;
     var wFan=parseFloat($('watt-fan').value)||50;
-    var cPk=kwh/100; // $ per kWh
+    var cPk=kwh/100;
 
-    // Track relay runtimes separately — fan relay may run alongside heater/AC
     var heaterMins=0, acMins=0, fanRelayMins=0, fanOnlyMins=0;
     var shortCycles=0, dailyMins={};
+    // Escalation counts: fan→AC and fan-heat→heater transitions
+    var fanCoolTotal=0, fanCoolEscalated=0, fanHeatTotal=0, fanHeatEscalated=0;
 
-    events.forEach(function(ev){
+    events.forEach(function(ev, i){
         var mins=ev.duration_mins||0, day=ev.ts_start.slice(0,10);
         if (mins>0&&mins<5) shortCycles++;
         dailyMins[day]=(dailyMins[day]||0)+mins;
         switch(ev.type){
             case 'heating':    heaterMins+=mins; break;
             case 'cooling':    acMins+=mins; break;
-            case 'fan':        fanOnlyMins+=mins; fanRelayMins+=mins; break;
-            case 'fan-heat':   fanOnlyMins+=mins; fanRelayMins+=mins; break;
+            case 'fan':        fanOnlyMins+=mins; fanRelayMins+=mins; fanCoolTotal++; break;
+            case 'fan-heat':   fanOnlyMins+=mins; fanRelayMins+=mins; fanHeatTotal++; break;
             case 'fan+ac':     acMins+=mins; fanRelayMins+=mins; break;
             case 'fan+heater': heaterMins+=mins; fanRelayMins+=mins; break;
         }
+        // Check if this fan event was immediately followed by an appliance escalation
+        var next = events[i+1];
+        if (next && ev.type === 'fan'      && next.type === 'cooling')  fanCoolEscalated++;
+        if (next && ev.type === 'fan-heat' && next.type === 'heating')  fanHeatEscalated++;
     });
 
     var costHeat=(heaterMins/60)*(wHeat/1000)*cPk;
@@ -823,7 +790,6 @@ function buildInsights(events) {
     var costFan=(fanRelayMins/60)*(wFan/1000)*cPk;
     var totalCost=costHeat+costCool+costFan;
 
-    // Efficiency: what fraction of active cycles used only the fan (cheapest)?
     var totalActiveMins=heaterMins+acMins+fanOnlyMins;
     var efficiency=totalActiveMins>0?Math.round((fanOnlyMins/totalActiveMins)*100):0;
     var effLabel=efficiency>=70?'excellent':efficiency>=45?'good':efficiency>=20?'fair':'low';
@@ -845,8 +811,8 @@ function buildInsights(events) {
     );
 
     lines.push(
-        'Estimated cost: <strong>$'+totalCost.toFixed(2)+'</strong> this week '+
-        '(heater $'+costHeat.toFixed(2)+', AC $'+costCool.toFixed(2)+', fan $'+costFan.toFixed(2)+').'
+        'Estimated cost: <strong>A$'+totalCost.toFixed(2)+'</strong> this week '+
+        '(heater A$'+costHeat.toFixed(2)+', AC A$'+costCool.toFixed(2)+', fan A$'+costFan.toFixed(2)+').'
     );
 
     lines.push(
@@ -857,9 +823,26 @@ function buildInsights(events) {
     lines.push(
         'Ventilation efficiency: <strong>'+efficiency+'%</strong> fan-only cycles ('+effLabel+').'+
         (efficiency<40&&potentialSave&&parseFloat(potentialSave)>0.01
-            ? ' Replacing AC cycles with fan when outdoor is cooler could save up to <strong>$'+potentialSave+'/wk</strong>.'
+            ? ' Replacing AC cycles with fan when outdoor is cooler could save up to <strong>A$'+potentialSave+'/wk</strong>.'
             : efficiency>=70?' Outdoor ventilation is well utilised — appliances activate only when necessary.':'')
     );
+
+    // Escalation stats (fan-first strategy effectiveness)
+    var escalParts = [];
+    if (fanCoolTotal > 0) {
+        var fanCoolResolved = fanCoolTotal - fanCoolEscalated;
+        var fanCoolPct = Math.round(fanCoolResolved / fanCoolTotal * 100);
+        escalParts.push('cooling: fan resolved <strong>'+fanCoolPct+'%</strong> unaided'+
+            (fanCoolEscalated > 0 ? ', escalated to AC <strong>'+fanCoolEscalated+'×</strong>' : ''));
+    }
+    if (fanHeatTotal > 0) {
+        var fanHeatResolved = fanHeatTotal - fanHeatEscalated;
+        var fanHeatPct = Math.round(fanHeatResolved / fanHeatTotal * 100);
+        escalParts.push('heating: fan resolved <strong>'+fanHeatPct+'%</strong> unaided'+
+            (fanHeatEscalated > 0 ? ', escalated to heater <strong>'+fanHeatEscalated+'×</strong>' : ''));
+    }
+    if (escalParts.length > 0)
+        lines.push('Fan-first strategy — ' + escalParts.join('; ') + '.');
 
     if (shortCycles>=3)
         lines.push('<strong>'+shortCycles+' short cycles</strong> (<5 min) out of '+events.length+
@@ -887,3 +870,208 @@ function buildInsights(events) {
 loadSettings();
 fetchWeather();
 setInterval(fetchWeather, 300000);
+
+// ── Live data polling (browser / Netlify remote view) ─────────────
+// In Linx, hvac_jsloop.js drives the DOM directly every 2 s.
+// In a regular browser (Netlify), poll PocketBase for the latest reading
+// so the Control view shows real sensor data without the hardware loop.
+(function startLivePolling() {
+    if (typeof turnOn !== 'undefined') return; // Linx runtime — skip
+
+    var lastReadingTs = null;
+    var pollCount = 0;
+
+    // Full recommendation builder — mirrors hvac_jsloop.js buildRec()
+    function buildRec(temp, diff, state) {
+        var trendRate = null;
+        if (tempHistory.length >= 3) {
+            var sl = tempHistory.slice(-Math.min(tempHistory.length, 10));
+            var dtHrs = (sl[sl.length - 1].ts - sl[0].ts) / 3600000;
+            if (dtHrs > 0.0001)
+                trendRate = (sl[sl.length - 1].temp - sl[0].temp) / dtHrs;
+        }
+
+        var shutoffBuf = SHUTOFF_BUFFER || 0;
+        var arrow = trendRate === null || Math.abs(trendRate) < 0.2 ? '→'
+                  : trendRate > 0 ? '↑' : '↓';
+        var shutoffCool = tempStr(targetTemp + shutoffBuf);
+        var shutoffHeat = tempStr(targetTemp - shutoffBuf);
+        var absDiff     = dispDelta(Math.abs(diff)) + dispUnit();
+
+        // Status line
+        var statusLine;
+        if (state === 'idle') {
+            statusLine = arrow + ' Indoor <strong>' + tempStr(temp) + '</strong> — within ' +
+                dispBand() + ' of target (' + tempStr(targetTemp) + '). No action required.';
+        } else if (state === 'cooling') {
+            var outNote = outdoorTemp !== null
+                ? 'Outdoor (' + tempStr(outdoorTemp) + ') not cooler than indoor — AC active.'
+                : 'No outdoor data — AC active.';
+            statusLine = arrow + ' Indoor <strong>' + tempStr(temp) + '</strong> — ' +
+                dispDelta(diff) + dispUnit() + ' above target. ' + outNote +
+                ' Shutoff at <strong>' + shutoffCool + '</strong>.';
+        } else if (state === 'fan') {
+            statusLine = arrow + ' Indoor <strong>' + tempStr(temp) + '</strong> — ' +
+                dispDelta(diff) + dispUnit() + ' above target. Outdoor (' +
+                (outdoorTemp !== null ? tempStr(outdoorTemp) : '--') +
+                ') is cooler — inlet fan ventilating (no AC cost). Shutoff at <strong>' + shutoffCool + '</strong>.';
+        } else if (state === 'heating') {
+            statusLine = arrow + ' Indoor <strong>' + tempStr(temp) + '</strong> — ' +
+                absDiff + ' below target. Heater active. Shutoff at <strong>' + shutoffHeat + '</strong>.';
+        } else if (state === 'fan-heat') {
+            statusLine = arrow + ' Indoor <strong>' + tempStr(temp) + '</strong> — ' +
+                absDiff + ' below target. Outdoor (' +
+                (outdoorTemp !== null ? tempStr(outdoorTemp) : '--') +
+                ') is warmer — inlet fan drawing warm air in (no heater cost). Shutoff at <strong>' + shutoffHeat + '</strong>.';
+        } else {
+            statusLine = arrow + ' Indoor <strong>' + tempStr(temp) + '</strong>.';
+        }
+
+        var lines = [statusLine];
+
+        // Trend line
+        if (trendRate !== null) {
+            var absRate = (Math.abs(trendRate) * (isCelsius ? 1 : 9 / 5)).toFixed(1);
+            var dir = trendRate > 0 ? 'rising' : 'falling';
+            if (Math.abs(trendRate) < 0.2) {
+                lines.push('Temperature is <strong>stable</strong>.');
+            } else {
+                var note, etaLine = null;
+                if (state === 'idle') {
+                    var edge = trendRate > 0 ? idleBand - diff : -idleBand - diff;
+                    var mins = Math.round(Math.abs(edge / trendRate) * 60);
+                    note = trendRate > 0
+                        ? 'Drifting toward upper threshold'
+                        : 'Drifting toward lower threshold';
+                    if (mins > 0 && mins < 120) note += ' — HVAC may activate in ~<strong>' + mins + ' min</strong>.';
+                    else note += '.';
+                } else if (state === 'cooling' || state === 'fan') {
+                    if (trendRate > 0) {
+                        note = '⚠ Still climbing — cooling urgently needed.';
+                    } else {
+                        note = 'Cooling is working — temperature dropping.';
+                        var dist = diff - shutoffBuf;
+                        if (dist > 0 && Math.abs(trendRate) > 0.05) {
+                            var eta = Math.round((dist / Math.abs(trendRate)) * 60);
+                            if (eta > 0 && eta < 240) etaLine = 'ETA to target: ~<strong>' + eta + ' min</strong>.';
+                        }
+                    }
+                } else {
+                    if (trendRate < 0) {
+                        note = '⚠ Still falling — heating urgently needed.';
+                    } else {
+                        note = 'Heating is working — temperature rising.';
+                        var distH = -diff - shutoffBuf;
+                        if (distH > 0 && Math.abs(trendRate) > 0.05) {
+                            var etaH = Math.round((distH / Math.abs(trendRate)) * 60);
+                            if (etaH > 0 && etaH < 240) etaLine = 'ETA to target: ~<strong>' + etaH + ' min</strong>.';
+                        }
+                    }
+                }
+                lines.push('Trend: <strong>' + dir + '</strong> at ' + absRate + dispUnit() + '/hr — ' + note);
+                if (etaLine) lines.push(etaLine);
+            }
+        }
+
+        if (outdoorHum !== null)
+            lines.push('Outdoor humidity: <strong>' + outdoorHum + '%</strong> — ' + humLabel(outdoorHum) + '.');
+        if (outdoorTemp !== null) {
+            var capStr = (outdoorDesc && outdoorDesc !== '--')
+                ? ' (' + outdoorDesc.replace(/\b\w/g, function(c) { return c.toUpperCase(); }) + ')'
+                : '';
+            lines.push('Outdoor: <strong>' + tempStr(outdoorTemp) + '</strong>' + capStr + '.');
+        }
+
+        return lines.join('<br>');
+    }
+
+    function pollLiveData() {
+        pollCount++;
+
+        // Auto-refresh history view when it's open (every 6 polls = 30 s)
+        if (pollCount % 6 === 0) {
+            var histView = $('view-history');
+            if (histView && histView.style.display !== 'none') loadHistory(currentRange);
+        }
+
+        // Re-sync settings every 30 polls (~150 s)
+        if (pollCount % 30 === 1) {
+            fetch(PB + '/api/collections/settings/records?perPage=1')
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    if (!d.items || !d.items.length) return;
+                    var s = d.items[0];
+                    if (s.idle_band != null) { idleBand = s.idle_band; $('idle-band').innerText = dispBand(); var ib2=$('idle-band-2'); if(ib2) ib2.innerText=dispBand(); }
+                    if (s.shutoff_buffer != null) { SHUTOFF_BUFFER = s.shutoff_buffer; var sb=$('shutoff-buffer-val'); if(sb) sb.innerText=dispDelta(SHUTOFF_BUFFER)+dispUnit(); }
+                    if (s.is_celsius != null && s.is_celsius !== isCelsius) setUnit(s.is_celsius);
+                })
+                .catch(function() {});
+        }
+
+        fetch(PB + '/api/collections/readings/records?sort=-ts&perPage=1')
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                if (!d.items || !d.items.length) return;
+                var rec = d.items[0];
+                var temp = parseFloat(rec.indoor_temp);
+                if (isNaN(temp)) return;
+
+                var ageMs  = Date.now() - new Date(rec.ts).getTime();
+                var stale  = ageMs > 300000;
+                var ageStr = ageMs < 60000 ? Math.round(ageMs / 1000) + 's ago'
+                                           : Math.round(ageMs / 60000) + ' min ago';
+
+                if (rec.target_temp != null) {
+                    targetTemp = parseFloat(rec.target_temp);
+                    $('target-temp').innerText = dispTemp(targetTemp) + dispUnit();
+                }
+
+                lastKnownTemp = temp;
+                var diff  = temp - targetTemp;
+                var state = rec.hvac_state || 'idle';
+
+                $('indoor-temp').innerText = dispTemp(temp) + (stale ? ' ⚠' : '');
+                $('indoor-temp').style.color = stale ? '#4e6580' :
+                    (state === 'cooling' || state === 'fan') ? '#ef4444' :
+                    (state === 'heating' || state === 'fan-heat') ? '#38bdf8' : '#2dd4bf';
+
+                $('temp-diff').innerText =
+                    (diff >= 0 ? '+' : '') + dispDelta(diff) + dispUnit();
+
+                if (stale) {
+                    setDevice('heater', false, '');
+                    setDevice('cooler', false, '');
+                    setDevice('fan',    false, '');
+                    setBadge('idle', 'Offline');
+                    updateRec(
+                        '⚠ Last reading ' + ageStr + ' — worker not running. ' +
+                        'Last known indoor temp: <strong>' + tempStr(temp) + '</strong>. ' +
+                        'Run: node hvac-worker.js',
+                        'idle'
+                    );
+                } else {
+                    setDevice('heater', state === 'heating',  'heat');
+                    setDevice('cooler', state === 'cooling',  'cool');
+                    setDevice('fan',    state === 'fan' || state === 'fan-heat',
+                              state === 'fan' ? 'cool' : 'heat');
+
+                    if (state === 'cooling' || state === 'fan')         setBadge('cooling', 'Cooling');
+                    else if (state === 'heating' || state === 'fan-heat') setBadge('heating', 'Heating');
+                    else                                                  setBadge('idle', 'Idle');
+
+                    var recType = (state === 'cooling' || state === 'fan') ? 'cool'
+                                : (state === 'heating' || state === 'fan-heat') ? 'heat' : 'idle';
+
+                    // Add to live chart on every poll (smooth chart even with 10s PB writes)
+                    addToHistory(temp);
+                    if (rec.ts !== lastReadingTs) lastReadingTs = rec.ts;
+
+                    updateRec(buildRec(temp, diff, state), recType);
+                }
+            })
+            .catch(function() {});
+    }
+
+    pollLiveData();
+    setInterval(pollLiveData, 5000);
+})();
