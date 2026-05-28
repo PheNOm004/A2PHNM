@@ -5,8 +5,8 @@ var targetTemp   = 22.0;        // desired indoor temp (always stored in °C)
 var idleBand     = 1.0;         // ±°C dead-band before HVAC activates
 var SHUTOFF_BUFFER      = 0.3;   // °C before target to cut devices (simple mode)
 var USE_DYNAMIC_SHUTOFF = false; // when true: use COAST_FACTOR/THERMAL_COEFF/COAST_ASYMMETRY instead
-var COAST_FACTOR        = 0.15;  // scales thermal momentum contribution to shutoff offset
-var THERMAL_COEFF       = 0.035; // scales outdoor/indoor temp gap contribution to shutoff offset
+var COAST_FACTOR        = 0.25;  // °C shutoff per 1°C/hr of current rate (momentum coast)
+var THERMAL_COEFF       = 0.05;  // °C shutoff per 1°C of outdoor/indoor gap (thermal drift)
 var COAST_ASYMMETRY     = 0.0;   // -1 = warm bias, 0 = neutral, +1 = cool bias
 var outdoorTemp  = null;        // from OpenWeatherMap (°C)
 var outdoorFeels = null;
@@ -207,8 +207,10 @@ function updateCoeffsFromWeather() {
     if (!USE_DYNAMIC_SHUTOFF) return;
     var indoorRef = lastKnownTemp !== null ? lastKnownTemp : targetTemp;
     var diff = Math.abs(outdoorTemp - indoorRef);
-    COAST_FACTOR  = parseFloat(Math.max(0.050, Math.min(0.300, 0.050 + diff * 0.010)).toFixed(3));
-    THERMAL_COEFF = parseFloat(Math.max(0.010, Math.min(0.060, 0.010 + (outdoorHum || 50) / 100 * 0.050)).toFixed(3));
+    // COAST_FACTOR: 0.10 at 0°C gap → 0.40 at 15°C gap (wider outdoor/indoor diff = more inertia)
+    COAST_FACTOR  = parseFloat(Math.max(0.10, Math.min(0.40, 0.10 + diff * 0.020)).toFixed(3));
+    // THERMAL_COEFF: 0.02 dry → 0.10 very humid (humid air transfers heat faster)
+    THERMAL_COEFF = parseFloat(Math.max(0.02, Math.min(0.10, 0.02 + (outdoorHum || 50) / 100 * 0.08)).toFixed(3));
     var cfEl = $('coast-factor');  if (cfEl) cfEl.value = COAST_FACTOR.toFixed(3);
     var tcEl = $('thermal-coeff'); if (tcEl) tcEl.value = THERMAL_COEFF.toFixed(3);
     patchSettings();

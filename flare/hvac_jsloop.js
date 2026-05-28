@@ -53,21 +53,35 @@ if (!isNaN(parseFloat(currentTemp))) {
 
   // ── Shutoff calculation ────────────────────────────────────────
   // Simple mode: fixed SHUTOFF_BUFFER for both directions.
-  // Dynamic mode: momentum + thermal drift, with optional asymmetry bias.
+  // Dynamic mode: momentum + thermal drift + asymmetry preference.
+  //
+  // State machine exits cooling when: currentTemp <= target + coolShutoff
+  //   positive coolShutoff → cuts off ABOVE target (too warm if momentum insufficient)
+  //   zero / negative       → cuts off AT or BELOW target (overshoot into cool)
+  // State machine exits heating when: currentTemp >= target - heatShutoff  (same logic, inverted)
   var coolShutoff, heatShutoff;
   if (USE_DYNAMIC_SHUTOFF) {
+    // Momentum coast — expected temperature drift after appliance shuts off.
+    // COAST_FACTOR (°C per °C/hr of current rate): higher = shut off sooner, rely more on inertia.
     var momentumCoast = trendRate !== null ? Math.abs(trendRate) * COAST_FACTOR : 0;
-    var naturalDrift  = outdoorTemp !== null ? Math.abs(currentTemp - outdoorTemp) * THERMAL_COEFF : 0;
-    var dynOffset     = Math.max(0.1, Math.min(idleBand * 0.5, momentumCoast + naturalDrift));
-    var asymAdj = COAST_ASYMMETRY * 0.2;
-    // Cool+ (positive) → smaller coolShutoff → cools further; Warm+ (negative) → smaller heatShutoff → heats further.
-    // When |asymmetry| > 0.5, the shutoff crosses zero — system deliberately overshoots the target.
-    var coolOvershoot = COAST_ASYMMETRY > 0.5 ? (COAST_ASYMMETRY - 0.5) * 2.0 : 0;
-    var heatOvershoot = COAST_ASYMMETRY < -0.5 ? (-COAST_ASYMMETRY - 0.5) * 2.0 : 0;
-    coolShutoff = Math.min(idleBand - 0.2, dynOffset - asymAdj - coolOvershoot);
-    heatShutoff = Math.min(idleBand - 0.2, dynOffset + asymAdj - heatOvershoot);
-    if (coolOvershoot === 0) coolShutoff = Math.max(0.1, coolShutoff);
-    if (heatOvershoot === 0) heatShutoff = Math.max(0.1, heatShutoff);
+
+    // Natural drift — outdoor/indoor gap keeps pushing temperature after shutoff.
+    // THERMAL_COEFF (°C per °C of outdoor gap): higher = more outdoor influence on coasting.
+    var naturalDrift = outdoorTemp !== null ? Math.abs(currentTemp - outdoorTemp) * THERMAL_COEFF : 0;
+
+    // Base neutral shutoff: floor 0.15°C, cap at 60% of idle band.
+    var dynOffset = Math.max(0.15, Math.min(idleBand * 0.6, momentumCoast + naturalDrift));
+
+    // Asymmetry: scales with idle band so effect is always proportional to the active range.
+    // At ±100%: shifts shutoff by 40% of idle band (e.g. 0.8°C with a 2°C band).
+    // Cool+ (positive): coolShutoff ↓ (cools further/past target), heatShutoff ↑ (heats less).
+    // Warm+ (negative): heatShutoff ↓ (heats further/past target), coolShutoff ↑ (cools less).
+    var asymShift = COAST_ASYMMETRY * idleBand * 0.4;
+    var maxOff    =  idleBand - 0.2;     // can't shut off more than 80% of band away from target
+    var minOff    = -(idleBand * 0.4);   // overshoot up to 40% of idle band past target
+
+    coolShutoff = Math.max(minOff, Math.min(maxOff, dynOffset - asymShift));
+    heatShutoff = Math.max(minOff, Math.min(maxOff, dynOffset + asymShift));
   } else {
     coolShutoff = heatShutoff = Math.max(0, SHUTOFF_BUFFER || 0);
   }
