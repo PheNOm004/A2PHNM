@@ -397,6 +397,7 @@ async function loadSettings() {
             var caEl=$('coast-asymmetry-val'); if (caEl) caEl.innerText=coastAsymmetryLabel();
             _syncDynamicUI();
             $('setup-modal').style.display = 'none'; // settings exist — skip setup
+            fetchWeather(); // re-fetch now that stored city is set
         }
     } catch(e) {}
 }
@@ -1089,7 +1090,13 @@ setInterval(fetchWeather, 300000);
         fetch(PB + '/api/collections/readings/records?sort=-ts&perPage=1')
             .then(function(r) { return r.json(); })
             .then(function(d) {
-                if (!d.items || !d.items.length) return;
+                if (!d.items || !d.items.length) {
+                    $('indoor-temp').innerText = '--';
+                    $('indoor-temp').style.color = '#4e6580';
+                    setBadge('idle', 'Idle');
+                    updateRec('⏳ Waiting for device — no readings in database yet. Ensure the Linx device is running and connected.', '');
+                    return;
+                }
                 var rec = d.items[0];
                 var temp = parseFloat(rec.indoor_temp);
                 if (isNaN(temp)) return;
