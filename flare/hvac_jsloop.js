@@ -51,21 +51,31 @@ if (!isNaN(parseFloat(currentTemp))) {
       trendRate = (sl[sl.length - 1].temp - sl[0].temp) / dtHrs;
   }
 
-  // ── Hard-limit shutoff ────────────────────────────────────────
-  // Devices cut when temperature reaches within SHUTOFF_BUFFER of target.
-  // Set SHUTOFF_BUFFER > 0 to let thermal momentum carry the rest of the way.
-  var shutoffBuf = SHUTOFF_BUFFER || 0;
+  // ── Shutoff calculation ────────────────────────────────────────
+  // Simple mode: fixed SHUTOFF_BUFFER for both directions.
+  // Dynamic mode: momentum + thermal drift, with optional asymmetry bias.
+  var coolShutoff, heatShutoff;
+  if (USE_DYNAMIC_SHUTOFF) {
+    var momentumCoast = trendRate !== null ? Math.abs(trendRate) * COAST_FACTOR : 0;
+    var naturalDrift  = outdoorTemp !== null ? Math.abs(currentTemp - outdoorTemp) * THERMAL_COEFF : 0;
+    var dynOffset     = Math.max(0.1, Math.min(idleBand * 0.5, momentumCoast + naturalDrift));
+    var asymAdj       = COAST_ASYMMETRY * 0.2;
+    coolShutoff = Math.max(0.1, Math.min(idleBand - 0.2, dynOffset + asymAdj));
+    heatShutoff = Math.max(0.1, Math.min(idleBand - 0.2, dynOffset - asymAdj));
+  } else {
+    coolShutoff = heatShutoff = Math.max(0, SHUTOFF_BUFFER || 0);
+  }
 
   // ── State machine (hysteresis) ────────────────────────────────
   // Entry: only from idle when diff exceeds ±idleBand
-  // Exit:  when diff is within ±shutoffBuf of target
+  // Exit:  direction-specific shutoff offsets
   if (isAutomatic) {
     if (hvacState === "idle") {
       if (diff < -idleBand) hvacState = "heating";
       else if (diff > idleBand) hvacState = "cooling";
     }
-    if (hvacState === "heating" && diff >= -shutoffBuf) hvacState = "idle";
-    if (hvacState === "cooling" && diff <= shutoffBuf)  hvacState = "idle";
+    if (hvacState === "heating" && diff >= -heatShutoff) hvacState = "idle";
+    if (hvacState === "cooling" && diff <= coolShutoff)  hvacState = "idle";
   }
 
   // ── Device selection ──────────────────────────────────────────
@@ -176,8 +186,7 @@ if (!isNaN(parseFloat(currentTemp))) {
             note = "⚠ Still climbing — cooling urgently needed.";
           } else {
             // Temp falling (correct direction): estimate ETA to shutoff
-            var shutoffDiff = shutoffBuf || 0; // shutoff when diff ≤ shutoffDiff
-            var distToShutoff = diff - shutoffDiff;
+            var distToShutoff = diff - coolShutoff;
             if (distToShutoff > 0 && Math.abs(trendRate) > 0.05) {
               var etaMins = Math.round((distToShutoff / Math.abs(trendRate)) * 60);
               if (etaMins > 0 && etaMins < 240)
@@ -191,7 +200,7 @@ if (!isNaN(parseFloat(currentTemp))) {
             note = "⚠ Still falling — heating urgently needed.";
           } else {
             // Temp rising (correct direction): estimate ETA to shutoff
-            var distToShutoffH = -diff - (shutoffBuf || 0);
+            var distToShutoffH = -diff - heatShutoff;
             if (distToShutoffH > 0 && Math.abs(trendRate) > 0.05) {
               var etaMinsH = Math.round((distToShutoffH / Math.abs(trendRate)) * 60);
               if (etaMinsH > 0 && etaMinsH < 240)
@@ -221,8 +230,8 @@ if (!isNaN(parseFloat(currentTemp))) {
   // ── Execute state: drive GPIO outputs and update UI ───────────
   if (isAutomatic) {
     $("mode-display").innerText = "Auto";
-    var shutoffCoolTemp = tempStr(targetTemp + shutoffBuf);
-    var shutoffHeatTemp = tempStr(targetTemp - shutoffBuf);
+    var shutoffCoolTemp = tempStr(targetTemp + coolShutoff);
+    var shutoffHeatTemp = tempStr(targetTemp - heatShutoff);
 
     if (hvacState === "idle") {
       allOff();

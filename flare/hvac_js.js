@@ -3,7 +3,11 @@ var isAutomatic  = true;        // true = auto mode, false = manual
 var hvacState    = 'idle';      // 'idle' | 'heating' | 'cooling'
 var targetTemp   = 22.0;        // desired indoor temp (always stored in °C)
 var idleBand     = 1.0;         // ±°C dead-band before HVAC activates
-var SHUTOFF_BUFFER = 0.3;       // °C before target to cut devices — thermal momentum carries the rest
+var SHUTOFF_BUFFER      = 0.3;   // °C before target to cut devices (simple mode)
+var USE_DYNAMIC_SHUTOFF = false; // when true: use COAST_FACTOR/THERMAL_COEFF/COAST_ASYMMETRY instead
+var COAST_FACTOR        = 0.15;  // scales thermal momentum contribution to shutoff offset
+var THERMAL_COEFF       = 0.035; // scales outdoor/indoor temp gap contribution to shutoff offset
+var COAST_ASYMMETRY     = 0.0;   // -1 = warm bias, 0 = neutral, +1 = cool bias
 var outdoorTemp  = null;        // from OpenWeatherMap (°C)
 var outdoorFeels = null;
 var outdoorHum   = null;
@@ -41,11 +45,13 @@ var _histMeta     = null;
 var _dbTick       = 0;        // counts loop cycles; DB write happens every 15th (≈30 s)
 var _showDotLabels = true;    // show/hide temperature labels on event dots in history chart
 var STATE_COLORS  = {
-    heating:    '#f04040',
-    'fan-heat': '#e09030',
-    cooling:    '#40a8f8',
-    fan:        '#24d09a',
-    idle:       '#4e6580'
+    heating:      '#f04040',
+    'fan+heater': '#f87060',
+    'fan-heat':   '#e09030',
+    cooling:      '#40a8f8',
+    'fan+ac':     '#2bc4d8',
+    fan:          '#24d09a',
+    idle:         '#4e6580'
 };
 
 var modalTargetTemp = 22.0;
@@ -146,7 +152,8 @@ function adjustIdleBand(delta) {
     idleBand = Math.max(0.5, Math.min(3.0, Math.round((idleBand+delta)*2)/2));
     SHUTOFF_BUFFER = parseFloat(Math.min(SHUTOFF_BUFFER, Math.max(-2, idleBand - 0.2)).toFixed(1));
     $('idle-band').innerText = dispBand();
-    var el2=$('idle-band-2'); if (el2) el2.innerText=dispBand();
+    var el2=$('idle-band-2');  if (el2) el2.innerText=dispBand();
+    var el2b=$('idle-band-2b'); if (el2b) el2b.innerText=dispBand();
     var sbEl=$('shutoff-buffer-val'); if (sbEl) sbEl.innerText=dispDelta(SHUTOFF_BUFFER)+dispUnit();
     patchSettings();
 }
@@ -155,6 +162,54 @@ function adjustShutoffBuffer(delta) {
     // Clamp -2.0–(idleBand - 0.2). Negative values let the system overshoot the target before cutting out.
     SHUTOFF_BUFFER = parseFloat(Math.max(-2, Math.min(idleBand - 0.2, Math.round((SHUTOFF_BUFFER + delta) * 10) / 10)).toFixed(1));
     var el=$('shutoff-buffer-val'); if (el) el.innerText=dispDelta(SHUTOFF_BUFFER)+dispUnit();
+    patchSettings();
+}
+
+// ── Dynamic shutoff toggle ────────────────────────────────────────
+function _syncDynamicUI() {
+    var on = USE_DYNAMIC_SHUTOFF;
+    var btn = $('btn-dynamic-toggle');
+    if (btn) { btn.innerText = on ? 'Dynamic On' : 'Simple'; btn.className = 'btn-mode' + (on ? ' active' : ''); }
+    var dynPanel = $('dynamic-controls'), simPanel = $('simple-controls');
+    if (dynPanel) dynPanel.style.display = on ? '' : 'none';
+    if (simPanel) simPanel.style.display = on ? 'none' : '';
+}
+
+function toggleDynamicShutoff() {
+    USE_DYNAMIC_SHUTOFF = !USE_DYNAMIC_SHUTOFF;
+    _syncDynamicUI();
+    if (USE_DYNAMIC_SHUTOFF && outdoorTemp !== null) updateCoeffsFromWeather();
+    patchSettings();
+}
+
+function coastAsymmetryLabel() {
+    if (Math.abs(COAST_ASYMMETRY) < 0.05) return 'Neutral';
+    var pct = Math.abs(Math.round(COAST_ASYMMETRY * 100));
+    return COAST_ASYMMETRY > 0 ? 'Cool +' + pct + '%' : 'Warm +' + pct + '%';
+}
+
+function adjustCoastAsymmetry(delta) {
+    COAST_ASYMMETRY = Math.max(-1.0, Math.min(1.0, Math.round((COAST_ASYMMETRY + delta) * 10) / 10));
+    var el = $('coast-asymmetry-val'); if (el) el.innerText = coastAsymmetryLabel();
+    patchSettings();
+}
+
+function updateCoeff() {
+    var cf = parseFloat(($('coast-factor')  || {}).value);
+    var tc = parseFloat(($('thermal-coeff') || {}).value);
+    if (!isNaN(cf) && cf > 0) COAST_FACTOR  = parseFloat(cf.toFixed(3));
+    if (!isNaN(tc) && tc > 0) THERMAL_COEFF = parseFloat(tc.toFixed(3));
+    patchSettings();
+}
+
+function updateCoeffsFromWeather() {
+    if (!USE_DYNAMIC_SHUTOFF) return;
+    var indoorRef = lastKnownTemp !== null ? lastKnownTemp : targetTemp;
+    var diff = Math.abs(outdoorTemp - indoorRef);
+    COAST_FACTOR  = parseFloat(Math.max(0.050, Math.min(0.300, 0.050 + diff * 0.010)).toFixed(3));
+    THERMAL_COEFF = parseFloat(Math.max(0.010, Math.min(0.060, 0.010 + (outdoorHum || 50) / 100 * 0.050)).toFixed(3));
+    var cfEl = $('coast-factor');  if (cfEl) cfEl.value = COAST_FACTOR.toFixed(3);
+    var tcEl = $('thermal-coeff'); if (tcEl) tcEl.value = THERMAL_COEFF.toFixed(3);
     patchSettings();
 }
 
@@ -188,6 +243,18 @@ function manualControl(cmd) {
         manualDevice = 'fan';
         setBadge('cooling', 'Cooling');
         updateRec('Manual: Inlet fan on.', 'cool');
+    } else if (cmd === 'heater+fan') {
+        if (typeof turnOn !== 'undefined') { turnOn(RedLed); turnOn(InletFan); }
+        setDevice('heater', true, 'heat'); setDevice('fan', true, 'heat');
+        manualDevice = 'fan+heater';
+        setBadge('heating', 'Heating');
+        updateRec('Manual: Fan + Heater on.', 'heat');
+    } else if (cmd === 'cooler+fan') {
+        if (typeof turnOn !== 'undefined') { turnOn(GreenLed); turnOn(InletFan); }
+        setDevice('cooler', true, 'cool'); setDevice('fan', true, 'cool');
+        manualDevice = 'fan+ac';
+        setBadge('cooling', 'Cooling');
+        updateRec('Manual: Fan + AC on.', 'cool');
     } else {
         manualDevice = 'idle';
         setBadge('manual', 'Manual');
@@ -297,6 +364,7 @@ async function fetchWeather() {
         $('out-conditions').innerText = cap(outdoorDesc);
         $('out-temp-lbl').innerText = 'Temp '+dispUnit();
         var inp=$('city-in'); inp.value=''; inp.placeholder=d.name+', '+d.sys.country;
+        updateCoeffsFromWeather();
     } catch(e) {}
 }
 
@@ -320,7 +388,11 @@ async function loadSettings() {
             var s=d.items[0];
             settingsId=s.id; targetTemp=s.target_temp||targetTemp; idleBand=s.idle_band||idleBand;
             isCelsius = s.is_celsius !== undefined ? s.is_celsius : isCelsius;
-            if (s.shutoff_buffer != null) SHUTOFF_BUFFER = s.shutoff_buffer;
+            if (s.shutoff_buffer      != null) SHUTOFF_BUFFER      = s.shutoff_buffer;
+            if (s.use_dynamic_shutoff != null) USE_DYNAMIC_SHUTOFF = s.use_dynamic_shutoff;
+            if (s.coast_factor        != null) COAST_FACTOR        = s.coast_factor;
+            if (s.thermal_coeff       != null) THERMAL_COEFF       = s.thermal_coeff;
+            if (s.coast_asymmetry     != null) COAST_ASYMMETRY     = s.coast_asymmetry;
             if (s.cost_kwh    != null) { var el=$('cost-kwh');    if (el) el.value=s.cost_kwh;    }
             if (s.watt_heater != null) { var el=$('watt-heater'); if (el) el.value=s.watt_heater; }
             if (s.watt_cooler != null) { var el=$('watt-cooler'); if (el) el.value=s.watt_cooler; }
@@ -331,6 +403,10 @@ async function loadSettings() {
             $('idle-band').innerText   = dispBand();
             var ib2=$('idle-band-2');   if (ib2) ib2.innerText=dispBand();
             var sbEl=$('shutoff-buffer-val'); if (sbEl) sbEl.innerText=dispDelta(SHUTOFF_BUFFER)+dispUnit();
+            var cfEl=$('coast-factor');        if (cfEl) cfEl.value=COAST_FACTOR.toFixed(3);
+            var tcEl=$('thermal-coeff');       if (tcEl) tcEl.value=THERMAL_COEFF.toFixed(3);
+            var caEl=$('coast-asymmetry-val'); if (caEl) caEl.innerText=coastAsymmetryLabel();
+            _syncDynamicUI();
         }
     } catch(e) {}
 }
@@ -344,6 +420,8 @@ async function patchSettings() {
     pbPatch('/api/collections/settings/records/'+settingsId, {
         target_temp:targetTemp, idle_band:idleBand, is_celsius:isCelsius,
         shutoff_buffer:SHUTOFF_BUFFER,
+        use_dynamic_shutoff:USE_DYNAMIC_SHUTOFF,
+        coast_factor:COAST_FACTOR, thermal_coeff:THERMAL_COEFF, coast_asymmetry:COAST_ASYMMETRY,
         cost_kwh:kwh, watt_heater:wH, watt_cooler:wC, watt_fan:wF
     });
 }
@@ -683,8 +761,12 @@ function attachHistoryTooltip() {
 
 // ── Analysis view ─────────────────────────────────────────────────
 async function loadAnalysis() {
-    var ib2=$('idle-band-2');   if (ib2) ib2.innerText=dispBand();
-    var sbEl=$('shutoff-buffer-val'); if (sbEl) sbEl.innerText=dispDelta(SHUTOFF_BUFFER)+dispUnit();
+    var ib2=$('idle-band-2');          if (ib2) ib2.innerText=dispBand();
+    var sbEl=$('shutoff-buffer-val');  if (sbEl) sbEl.innerText=dispDelta(SHUTOFF_BUFFER)+dispUnit();
+    var cfEl=$('coast-factor');        if (cfEl) cfEl.value=COAST_FACTOR.toFixed(3);
+    var tcEl=$('thermal-coeff');       if (tcEl) tcEl.value=THERMAL_COEFF.toFixed(3);
+    var caEl=$('coast-asymmetry-val'); if (caEl) caEl.innerText=coastAsymmetryLabel();
+    _syncDynamicUI();
 
     var from=new Date(); from.setDate(from.getDate()-7);
     var fStr=from.toISOString().replace('T',' ').slice(0,19);
@@ -1050,17 +1132,18 @@ setInterval(fetchWeather, 300000);
                         'idle'
                     );
                 } else {
-                    setDevice('heater', state === 'heating',  'heat');
-                    setDevice('cooler', state === 'cooling',  'cool');
-                    setDevice('fan',    state === 'fan' || state === 'fan-heat',
-                              state === 'fan' ? 'cool' : 'heat');
+                    setDevice('heater', state === 'heating' || state === 'fan+heater', 'heat');
+                    setDevice('cooler', state === 'cooling' || state === 'fan+ac',    'cool');
+                    setDevice('fan',
+                        state === 'fan' || state === 'fan-heat' || state === 'fan+heater' || state === 'fan+ac',
+                        (state === 'fan' || state === 'fan+ac') ? 'cool' : 'heat');
 
-                    if (state === 'cooling' || state === 'fan')         setBadge('cooling', 'Cooling');
-                    else if (state === 'heating' || state === 'fan-heat') setBadge('heating', 'Heating');
-                    else                                                  setBadge('idle', 'Idle');
+                    if (state === 'cooling' || state === 'fan' || state === 'fan+ac')               setBadge('cooling', 'Cooling');
+                    else if (state === 'heating' || state === 'fan-heat' || state === 'fan+heater') setBadge('heating', 'Heating');
+                    else                                                                             setBadge('idle', 'Idle');
 
-                    var recType = (state === 'cooling' || state === 'fan') ? 'cool'
-                                : (state === 'heating' || state === 'fan-heat') ? 'heat' : 'idle';
+                    var recType = (state === 'cooling' || state === 'fan' || state === 'fan+ac') ? 'cool'
+                                : (state === 'heating' || state === 'fan-heat' || state === 'fan+heater') ? 'heat' : 'idle';
 
                     // Add to live chart on every poll (smooth chart even with 10s PB writes)
                     addToHistory(temp);
