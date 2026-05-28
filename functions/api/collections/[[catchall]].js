@@ -58,7 +58,7 @@ export async function onRequest(context) {
     }
 
     const DB = env.DB;
-    if (!DB) return json({ error: 'DB binding missing' }, 500);
+    if (!DB) return json({ error: 'DB binding missing — check D1 is linked in Cloudflare dashboard' }, 500);
 
     // params.catchall is an array of path segments after /api/collections/
     // e.g. ['readings', 'records'] or ['readings', 'records', 'abc123']
